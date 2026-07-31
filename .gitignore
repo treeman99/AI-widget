@@ -1,0 +1,15 @@
+# SwiftPM 빌드 산출물
+.build/
+.swiftpm/
+Package.resolved
+
+# scripts/build-app.sh 가 만드는 .app 번들
+build/
+
+# macOS
+.DS_Store
+
+# Xcode (프로젝트 파일은 쓰지 않지만 실수로 생겼을 때를 대비)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/

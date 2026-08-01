@@ -45,6 +45,21 @@ public final class UsageMonitor: @unchecked Sendable {
         }
     }
 
+    /// 사용자가 '갱신'을 눌렀다. 조회 간격과 키체인 백오프를 걷어내고 즉시 다시 시도한다.
+    ///
+    /// 평소 갱신(`refresh`)은 5분 간격 스로틀을 지키고, 키체인 접근이 거부된 뒤에는 30분간
+    /// 물러난다. 사용자가 버튼을 누른 건 "지금 다시"라는 뜻이므로 두 제약을 모두 푼다.
+    public func forceLiveRefresh(now: Date = Date()) {
+        Credentials.resetClaudeBackoff()
+        for id in ServiceID.allCases where config.enabledServices.contains(id) {
+            if id == .claudeCode {
+                claude.forceLiveRefresh(now: now)
+            } else {
+                codex.forceLiveRefresh(now: now)
+            }
+        }
+    }
+
     /// 활성화된 서비스를 모두 갱신한다.
     public func refresh(now: Date = Date()) -> UsageSnapshot {
         let started = Date()

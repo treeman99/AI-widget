@@ -122,6 +122,12 @@ public final class CodexProvider: UsageProvider {
         live.refreshBlocking(now: now, force: true)
     }
 
+    /// 조회 간격을 무시하고 즉시 다시 시도한다. 사용자가 '갱신'을 눌렀을 때 쓴다.
+    public func forceLiveRefresh(now: Date = Date()) {
+        guard config.useLiveAPI else { return }
+        live.refreshIfNeeded(now: now, force: true)
+    }
+
     // MARK: - 스캔
 
     public func resetCache() {

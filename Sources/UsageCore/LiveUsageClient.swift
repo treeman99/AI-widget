@@ -125,14 +125,21 @@ public struct ClaudeLiveClient: LiveUsageFetching {
             throw LiveUsageError.tokenExpired
         }
 
-        let object = try HTTP.getJSON(
-            Self.endpoint,
-            headers: [
-                "Authorization": "Bearer \(credentials.accessToken)",
-                "anthropic-beta": "oauth-2025-04-20",
-                "Content-Type": "application/json",
-            ]
-        )
+        let object: [String: Any]
+        do {
+            object = try HTTP.getJSON(
+                Self.endpoint,
+                headers: [
+                    "Authorization": "Bearer \(credentials.accessToken)",
+                    "anthropic-beta": "oauth-2025-04-20",
+                    "Content-Type": "application/json",
+                ]
+            )
+        } catch LiveUsageError.httpStatus(let code) where code == 401 || code == 403 {
+            // 들고 있던 토큰이 죽었다. 캐시를 비워 다음 조회가 키체인을 다시 읽게 한다.
+            Credentials.invalidateClaudeCache()
+            throw LiveUsageError.httpStatus(code)
+        }
 
         // `limits` 배열이 가장 자세하다(세션 / 전체 주간 / 모델별 주간). 없으면 요약 필드로 물러난다.
         var windows = Self.windows(fromLimits: object["limits"])

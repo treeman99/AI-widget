@@ -73,6 +73,14 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    /// 사용자가 '갱신'을 눌렀다. 5분 스로틀과 키체인 백오프를 걷어내고 즉시 다시 조회한다.
+    func refreshNow() {
+        workQueue.async { [monitor] in
+            monitor.forceLiveRefresh()
+        }
+        refresh()
+    }
+
     /// 캐시를 버리고 전체를 다시 읽는다.
     func fullRescan() {
         workQueue.async { [monitor] in

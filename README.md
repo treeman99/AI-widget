@@ -15,16 +15,32 @@ Claude 15%   Codex 38%
 ## 빠른 시작
 
 ```bash
-# 1) 기준선 산출 (과거 30일 로그 전체 스캔, 최초 1회)
-swift build -c release
+# 1) 서명용 인증서 생성 (최초 1회) — 키체인 접근 창이 반복해서 뜨는 것을 막는다
+./scripts/create-signing-cert.sh
+
+# 2) 앱과 CLI를 빌드하고 서명 + 설치 + 실행
+./scripts/build-app.sh --install --launch
+
+# 3) 기준선 산출 (과거 30일 로그 전체 스캔, 최초 1회)
 .build/release/usagectl calibrate
 
-# 2) 숫자 확인
+# 4) 숫자 확인
 .build/release/usagectl status
-
-# 3) 앱 빌드 + 설치 + 실행
-./scripts/build-app.sh --install --launch
 ```
+
+순서가 중요하다. `build-app.sh`가 앱과 `usagectl`을 **함께** 빌드하고 서명하기 때문에,
+CLI를 먼저 쓰려고 `swift build`를 따로 돌리면 ad-hoc 서명 상태로 실행되어 키체인 창이
+한 번 더 뜬다.
+
+창은 두 종류가 뜬다. 헷갈리기 쉬우니 구분해 두자.
+
+| 창 | 언제 | 눌러야 할 것 |
+|---|---|---|
+| "codesign이 키 'AIUsageBar Self Signed'를 사용하려 합니다" | 빌드할 때 | **허용** (항상 허용은 권장하지 않음 — 아래 참고) |
+| "AI Usage이(가) 'Claude Code-credentials'를 사용하려고 합니다" | 앱이 사용량을 읽을 때 | **항상 허용** |
+
+두 번째 창은 한 번만 누르면 되고, 이후 재빌드해도 다시 묻지 않는다
+([키체인 접근 창](#키체인-접근-창) 참고).
 
 로그인할 때 자동 실행하려면 **시스템 설정 → 일반 → 로그인 항목**에 `AIUsageBar.app`을 추가한다.
 
@@ -43,6 +59,78 @@ swift build -c release
 인증에는 Claude Code와 Codex가 로그인할 때 저장한 OAuth 토큰을 **읽기만** 해서 쓴다
 (키체인 `Claude Code-credentials`, `~/.codex/auth.json`). 토큰을 갱신하지는 않는다 —
 refresh token을 회전시키면 각 도구 자신의 세션이 깨질 수 있다.
+
+### 키체인 접근 창
+
+Claude 토큰은 **다른 앱(Claude Code)이 만든** 키체인 항목이라, macOS가 접근 허용 창을 띄운다.
+한 번 "항상 허용"을 누르면 끝나야 하는데, 조건이 하나 있다 — **앱의 서명이 안정적이어야 한다.**
+
+"항상 허용"은 앱의 designated requirement를 신뢰 목록에 저장한다. ad-hoc 서명
+(`codesign --sign -`)은 이 requirement가 **바이너리 해시 그 자체**다.
+
+```
+designated => cdhash H"285d8d28..."
+```
+
+그래서 코드를 한 줄만 고쳐 다시 빌드해도 해시가 바뀌고, 키체인은 완전히 다른 앱으로 보아
+허용 기록을 버린다. 창이 계속 되돌아오는 이유다. `scripts/create-signing-cert.sh`가 만드는
+자체 서명 인증서로 서명하면 requirement가 인증서 기준이 된다.
+
+```
+designated => identifier "com.daegun.aiusagebar" and certificate leaf = H"f8dad562..."
+```
+
+바이너리가 바뀌어도 인증서는 그대로이므로 허용이 유지된다. Developer ID로 서명된 앱이
+업데이트 후에도 다시 묻지 않는 것과 같은 원리다.
+
+#### 대가: 서명 키를 지켜야 한다
+
+이 requirement에는 함정이 있다. `identifier`도 `certificate leaf` 해시도 **서명하는 쪽이
+정하는 값**이다. 그래서 개인키를 쓸 수 있는 프로세스는 아무 바이너리에나 이 앱과 똑같은
+requirement를 붙일 수 있고, 그 위조본은 사용자가 앱에 눌러 준 "항상 허용"을 그대로
+물려받아 Claude 토큰을 읽는다.
+
+```bash
+# 개인키에 무프롬프트로 접근할 수 있다면 이게 통과한다
+cp /bin/echo /tmp/forge
+codesign -f -s "AIUsageBar Self Signed" -i com.daegun.aiusagebar /tmp/forge
+# → /tmp/forge 의 designated requirement가 앱과 한 글자도 다르지 않다
+```
+
+ad-hoc 서명은 requirement가 cdhash라 이런 위조가 애초에 불가능했다. 편의를 얻는 대신
+그 성질을 버리는 것이므로, **개인키 보호가 이 방식의 전제 조건**이다.
+
+문제는 **명령행만으로는 그 보호를 걸 수 없다는 것**이다. `security import`에
+`-T /usr/bin/codesign`을 주지 않아도 macOS는 키를 무프롬프트로 내주고,
+`set-key-partition-list`는 partition만 건드리는데 codesign은 Apple 서명이라 어차피
+`apple:` partition을 통과한다. 기존 키의 ACL을 편집하는 CLI 명령은 없다.
+
+그래서 `create-signing-cert.sh`는 생성 직후 **실제로 위조를 시도해 보고**, 뚫리면
+GUI 설정을 안내한다. 키체인 접근.app에서 한 번만 하면 된다.
+
+> 로그인 키체인 → "나의 인증서" 탭 → `AIUsageBar Self Signed` 펼치기 → 개인 키 더블클릭
+> → **접근 제어** 탭 → "이 항목에 접근하려면 확인" 체크 → 저장
+
+이후 빌드할 때마다 승인 창이 뜬다. 여기서 **"항상 허용"을 누르면 이 보호가 도로
+풀린다.** "허용"을 눌러야 그 빌드에만 적용된다.
+
+이 설정을 할 생각이 없다면 인증서 방식을 쓰지 않는 편이 낫다. ad-hoc이 보안상 더 강하다
+(대신 재빌드마다 키체인 창이 뜬다).
+
+```bash
+security delete-identity -c "AIUsageBar Self Signed"
+```
+
+(참고로 Codex 토큰은 `~/.codex/auth.json` 평문 파일이라 원래부터 이 보호가 없다.
+키체인 ACL로 보호되는 건 Claude 토큰뿐이다.)
+
+여기에 더해 **키체인을 두드리는 횟수 자체를 줄인다.** 조회는 5분마다지만 키체인은 그때마다
+읽지 않는다 — 받은 토큰을 만료 시각까지 메모리에 들고 있다가, 만료 1분 전에만 다시 읽는다
+(실제로는 Claude Code의 토큰 갱신 주기와 같다). 사용자가 창을 닫으면 30분간 다시 묻지
+않는다. 서버가 토큰을 거부하면(401/403) 그때는 캐시를 버리고 곧바로 다시 읽는다.
+
+실수로 "거부"를 눌렀다면 30분을 기다릴 필요 없다. 드롭다운의 **갱신** 버튼이 5분 스로틀과
+30분 백오프를 모두 걷어내고 즉시 다시 시도한다.
 
 ### 폴백 3단계
 
@@ -182,4 +270,13 @@ Xcode 프로젝트는 없다. SwiftPM만으로 `.app` 번들까지 만든다 (`s
 - **Gemini 등 구독형 서비스는 지원하지 않는다.** 공개된 사용량 조회 경로가 없다.
 - 로그 포맷이 바뀌면 파서를 고쳐야 한다. 파싱에 실패하면 조용히 0을 표시하지
   않고 메뉴바에 `!`를 띄운다.
-- 앱을 다시 빌드하면 ad-hoc 서명이 바뀌어 키체인이 접근 허용을 다시 물을 수 있다.
+- **서명 인증서를 지우거나 다시 만들면** 키체인이 접근 허용을 한 번 더 묻는다. 인증서가
+  바뀌면 requirement도 바뀌기 때문이다. `create-signing-cert.sh`는 이미 인증서가 있으면
+  새로 만들지 않는다.
+- **`usagectl`을 `swift build`로 따로 빌드하면 ad-hoc 서명으로 되돌아간다.** SwiftPM이
+  링크할 때마다 서명을 새로 붙이기 때문이다. 그러면 CLI에 대해서만 키체인 창이 다시 뜬다.
+  `scripts/build-app.sh`가 앱과 CLI를 함께 빌드하고 서명하므로 그쪽을 쓰면 된다.
+- **서명 키를 "항상 허용"으로 열어 두면 위조가 가능해진다.** 위의
+  [대가: 서명 키를 지켜야 한다](#대가-서명-키를-지켜야-한다) 참고.
+- Claude Code가 토큰을 갱신할 때 키체인 항목을 통째로 다시 쓰면 항목에 걸린 허용 목록이
+  초기화될 수 있다. 이때는 서명과 무관하게 창이 한 번 더 뜬다.

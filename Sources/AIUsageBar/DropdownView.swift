@@ -77,7 +77,7 @@ struct DropdownView: View {
     private var footer: some View {
         HStack(spacing: 12) {
             Button {
-                store.refresh()
+                store.refreshNow()
             } label: {
                 Label("갱신", systemImage: "arrow.clockwise").font(.system(size: 11))
             }

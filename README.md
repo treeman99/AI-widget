@@ -117,9 +117,10 @@ list에 등록해도 마찬가지다 — 자체 서명 인증서에는 팀 ID가
 
 #### 예전 방식에서 넘어왔다면
 
-`scripts/create-signing-cert.sh`가 만들던 자체 서명 인증서는 더 이상 쓰이지 않는다.
-스크립트는 지웠지만 **개인키는 로그인 키체인에 남아 있다.** 그 키로 서명한 아무 바이너리나
-앱과 똑같은 designated requirement를 갖게 되므로, 쓰지 않을 거면 지우는 편이 낫다.
+예전에는 `scripts/create-signing-cert.sh`(지금은 저장소에 없다. 마지막 버전은
+`git show 0747acb:scripts/create-signing-cert.sh`)가 자체 서명 인증서를 만들었다. 그 인증서는
+더 이상 쓰이지 않지만, 스크립트를 지워도 **개인키는 로그인 키체인에 남는다.** 그 키로 서명한
+아무 바이너리나 앱과 똑같은 designated requirement를 갖게 되므로 지우는 편이 낫다.
 
 ```bash
 security delete-identity -c "AIUsageBar Self Signed"

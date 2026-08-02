@@ -356,4 +356,54 @@ final class LiveUsageTests: XCTestCase {
             .appendingPathComponent("no-such-auth-\(UUID().uuidString).json")
         XCTAssertThrowsError(try Credentials.codex(at: missing))
     }
+
+    // MARK: - security(1) 출력 파싱
+
+    /// 실제 항목과 같은 모양. `security … -w`는 끝에 개행 하나를 붙인다.
+    private static let claudePayload = """
+    {"mcpOAuth":{},"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc",\
+    "expiresAt":1785600000000,"subscriptionType":"max","rateLimitTier":"default_claude_max_5x"}}
+
+    """
+
+    func testParseClaudeReadsPlainPayload() {
+        let credentials = Credentials.parseClaude(Data(Self.claudePayload.utf8))
+        XCTAssertEqual(credentials?.accessToken, "sk-ant-oat01-abc")
+        XCTAssertEqual(credentials?.planLabel, "Max 5x")
+        XCTAssertEqual(credentials?.expiresAt, Date(timeIntervalSince1970: 1_785_600_000))
+    }
+
+    /// 값에 인쇄 가능 ASCII 밖의 바이트가 하나라도 있으면 `security`가 값 전체를 hex로 낸다.
+    /// MCP 서버 이름에 한글이 한 글자만 들어가도 이 경로를 탄다.
+    func testParseClaudeDecodesHexPayload() {
+        let hex = Data(Self.claudePayload.utf8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let credentials = Credentials.parseClaude(Data((hex + "\n").utf8))
+        XCTAssertEqual(credentials?.accessToken, "sk-ant-oat01-abc")
+        XCTAssertEqual(credentials?.subscriptionType, "max")
+    }
+
+    /// hex로도 읽히는 평문을 잘못 해독하면 안 된다. JSON을 먼저 시도하는 순서가 이걸 막는다.
+    func testParseClaudeDoesNotMisreadHexLookingPlaintext() {
+        XCTAssertNil(Credentials.parseClaude(Data("deadbeef\n".utf8)))
+    }
+
+    /// 항목은 있는데 값이 비었거나 형태가 다르면 exit 0이라 성공처럼 보인다. 여기서 걸러야 한다.
+    func testParseClaudeRejectsEmptyAndMalformed() {
+        XCTAssertNil(Credentials.parseClaude(Data()))
+        XCTAssertNil(Credentials.parseClaude(Data("\n".utf8)))
+        XCTAssertNil(Credentials.parseClaude(Data("{}".utf8)))
+        XCTAssertNil(Credentials.parseClaude(Data(#"{"claudeAiOauth":{"accessToken":""}}"#.utf8)))
+    }
+
+    /// 만료 시각이 없으면 `expiresAt`은 nil이고, 캐시는 짧은 TTL로 물러난다.
+    func testParseClaudeWithoutExpiry() {
+        let credentials = Credentials.parseClaude(
+            Data(#"{"claudeAiOauth":{"accessToken":"t"}}"#.utf8)
+        )
+        XCTAssertEqual(credentials?.accessToken, "t")
+        XCTAssertNil(credentials?.expiresAt)
+        XCTAssertFalse(credentials?.isExpired ?? true)
+    }
 }

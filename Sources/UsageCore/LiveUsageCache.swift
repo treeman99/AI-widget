@@ -2,9 +2,12 @@ import Foundation
 
 /// 실시간 조회 결과를 보관하고 호출 빈도를 제한한다.
 ///
-/// 로컬 로그 스캔은 몇십 ms지만 네트워크 조회는 초 단위다(키체인 접근만으로도 프로세스당
-/// 첫 회 몇 초가 걸린다). 그래서 조회는 **비동기로 던져두고 즉시 반환**하고, 화면에는
-/// 직전 결과를 쓴다. 결과가 도착하면 `onUpdate`로 알린다.
+/// 로컬 로그 스캔은 몇십 ms지만 네트워크 조회는 그보다 한참 오래 걸린다(키체인 읽기는
+/// 16ms로 싸다 — 막는 쪽은 네트워크다). 그래서 조회는 **비동기로 던져두고 즉시 반환**하고,
+/// 화면에는 직전 결과를 쓴다. 결과가 도착하면 `onUpdate`로 알린다.
+///
+/// `claimAttempt`가 `force`일 때도 `isFetching`을 먼저 보므로 조회는 동시에 두 번 돌지
+/// 않는다. 키체인이 잠겨 있을 때 잠금 해제 창이 겹쳐 뜨지 않는 것이 여기에 달려 있다.
 public final class LiveUsageCache: @unchecked Sendable {
     private let fetcher: LiveUsageFetching
     private let queue: DispatchQueue

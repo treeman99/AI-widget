@@ -15,32 +15,18 @@ Claude 15%   Codex 38%
 ## 빠른 시작
 
 ```bash
-# 1) 서명용 인증서 생성 (최초 1회) — 키체인 접근 창이 반복해서 뜨는 것을 막는다
-./scripts/create-signing-cert.sh
-
-# 2) 앱과 CLI를 빌드하고 서명 + 설치 + 실행
+# 1) 앱과 CLI를 빌드하고 설치 + 실행
 ./scripts/build-app.sh --install --launch
 
-# 3) 기준선 산출 (과거 30일 로그 전체 스캔, 최초 1회)
+# 2) 기준선 산출 (과거 30일 로그 전체 스캔, 최초 1회)
 .build/release/usagectl calibrate
 
-# 4) 숫자 확인
+# 3) 숫자 확인
 .build/release/usagectl status
 ```
 
-순서가 중요하다. `build-app.sh`가 앱과 `usagectl`을 **함께** 빌드하고 서명하기 때문에,
-CLI를 먼저 쓰려고 `swift build`를 따로 돌리면 ad-hoc 서명 상태로 실행되어 키체인 창이
-한 번 더 뜬다.
-
-창은 두 종류가 뜬다. 헷갈리기 쉬우니 구분해 두자.
-
-| 창 | 언제 | 눌러야 할 것 |
-|---|---|---|
-| "codesign이 키 'AIUsageBar Self Signed'를 사용하려 합니다" | 빌드할 때 | **허용** (항상 허용은 권장하지 않음 — 아래 참고) |
-| "AI Usage이(가) 'Claude Code-credentials'를 사용하려고 합니다" | 앱이 사용량을 읽을 때 | **항상 허용** |
-
-두 번째 창은 한 번만 누르면 되고, 이후 재빌드해도 다시 묻지 않는다
-([키체인 접근 창](#키체인-접근-창) 참고).
+키체인 접근 허용 창은 뜨지 않는다. 서명이나 빌드 순서에 신경 쓸 것도 없다
+([키체인을 어떻게 읽는가](#키체인을-어떻게-읽는가) 참고).
 
 로그인할 때 자동 실행하려면 **시스템 설정 → 일반 → 로그인 항목**에 `AIUsageBar.app`을 추가한다.
 
@@ -58,119 +44,104 @@ CLI를 먼저 쓰려고 `swift build`를 따로 돌리면 ad-hoc 서명 상태�
 
 인증에는 Claude Code와 Codex가 로그인할 때 저장한 OAuth 토큰을 **읽기만** 해서 쓴다
 (키체인 `Claude Code-credentials`, `~/.codex/auth.json`). 토큰을 갱신하지는 않는다 —
-refresh token을 회전시키면 각 도구 자신의 세션이 깨질 수 있다.
+refresh token을 회전시키면 각 도구 자신의 세션이 깨질 수 있다. 이 원칙은 아래에서 한 번 더
+중요해진다. 키체인 접근이 유지되는 것 자체가 **Claude Code 자신의 쓰기**에 기대고 있다.
 
-### 키체인 접근 창
+### 키체인을 어떻게 읽는가
 
-Claude 토큰은 **다른 앱(Claude Code)이 만든** 키체인 항목이라, macOS가 접근 허용 창을 띄운다.
-한 번 "항상 허용"을 누르면 끝나야 하는데, 조건이 하나 있다 — **앱의 서명이 안정적이어야 한다.**
+Claude 토큰은 **다른 앱(Claude Code)이 만든** 로그인 키체인 항목이다. 앱이
+`SecItemCopyMatching`으로 직접 읽으면 macOS가 접근 허용 창을 띄우는데, **이 창은
+"항상 허용"으로 잠재울 수 없다.** 그래서 직접 읽지 않고 `/usr/bin/security`를 자식
+프로세스로 띄운다.
 
-"항상 허용"은 앱의 designated requirement를 신뢰 목록에 저장한다. ad-hoc 서명
-(`codesign --sign -`)은 이 requirement가 **바이너리 해시 그 자체**다.
-
-```
-designated => cdhash H"285d8d28..."
-```
-
-그래서 코드를 한 줄만 고쳐 다시 빌드해도 해시가 바뀌고, 키체인은 완전히 다른 앱으로 보아
-허용 기록을 버린다. 창이 계속 되돌아오는 이유다. `scripts/create-signing-cert.sh`가 만드는
-자체 서명 인증서로 서명하면 requirement가 인증서 기준이 된다.
-
-```
-designated => identifier "com.daegun.aiusagebar" and certificate leaf = H"f8dad562..."
+```bash
+security find-generic-password -s "Claude Code-credentials" -a "$USER" -w
 ```
 
-바이너리가 바뀌어도 인증서는 그대로이므로 허용이 유지된다. Developer ID로 서명된 앱이
-업데이트 후에도 다시 묻지 않는 것과 같은 원리다.
+키체인 접근 판정의 대상은 앱이 아니라 **호출한 프로세스**다. `/usr/bin/security`는 항목의
+ACL에 이미 들어 있고(`identifier "com.apple.security" and anchor apple`, 상태 `OK`),
+아래에서 설명할 partition 검사도 통과한다.
 
-#### 그런데 서명만으로는 부족하다 — partition list
+#### 왜 직접 읽기로는 창을 없앨 수 없나
 
-인증서로 서명해 놓고도 창이 계속 뜬다면, 남은 원인은 거의 항상 이쪽이다. macOS는 키체인
-접근을 **두 단계로** 판정하는데, ACL의 applications 목록을 통과해도 그와 별개인
-**partition list**에서 다시 걸린다.
+macOS는 키체인 접근을 **두 단계로** 판정한다. ACL의 applications 목록을 통과해도 그와
+별개인 **partition list**에서 다시 걸린다.
 
 ```
-entry 1:                                     ← ACL: 인증서 기준이라 재빌드에도 유지된다
+entry 1:
     applications (11):
         0: /Applications/AIUsageBar.app (OK)
             requirement: identifier "com.daegun.aiusagebar" and certificate leaf = H"56fcfc13..."
-entry 3:                                     ← partition list: cdhash 라서 재빌드하면 깨진다
+        …
+       10: /usr/bin/security (OK)
+            requirement: identifier "com.apple.security" and anchor apple
+entry 3:
     authorizations (1): partition_id
-    description: apple-tool:, cdhash:629e71d1...
+    description: apple-tool:            ← 승인 때 박혔던 앱 cdhash가 지워져 있다
 ```
 
-"항상 허용"을 누르면 macOS는 ACL에는 designated requirement(인증서 기준)를 넣지만,
-partition list에는 **승인하던 순간 바이너리의 cdhash**를 박아 넣는다. 그래서 다시 빌드하면
-ACL은 여전히 맞는데 partition이 어긋나 창이 되돌아온다. 이 경우의 창에는 "허용/거부"
-버튼만이 아니라 **암호 입력란이 같이 있다** — partition을 고쳐 쓰려면 키체인을 열어야
-하기 때문이고, 순수한 ACL 미등록과 구별되는 표식이다.
+"항상 허용"을 누르면 ACL에는 designated requirement가 들어가지만, partition list에는
+**승인하던 순간 바이너리의 cdhash**가 박힌다. 그리고 **Claude Code는 토큰을 갱신할 때마다
+`security`로 이 항목을 덮어쓴다**(`security -i`에 `add-generic-password -U`를 먹인다).
+그 쓰기가 partition list를 쓰는 도구의 파티션인 `apple-tool:` 하나로 리셋하면서, 등록돼
+있던 cdhash를 지운다.
 
-자체 서명 인증서에는 팀 ID가 없어서 재빌드에도 안 변하는 `teamid:` 항목을 쓸 수 없다.
-그래서 `build-app.sh`가 서명 직후 새 cdhash를 직접 등록한다.
+그래서 앱의 서명을 어떻게 안정시켜도 창은 **토큰 갱신 주기마다** 되돌아온다. 자체 서명
+인증서로 requirement를 인증서 기준으로 고정해도, 빌드할 때마다 새 cdhash를 partition
+list에 등록해도 마찬가지다 — 자체 서명 인증서에는 팀 ID가 없어 재빌드에도 안 변하는
+`teamid:` 항목을 쓸 수도 없다.
 
-```bash
-security set-generic-password-partition-list \
-  -S "apple:,apple-tool:,cdhash:<앱>,cdhash:<usagectl>" \
-  -s "Claude Code-credentials" -a "$USER" ~/Library/Keychains/login.keychain-db
-```
+이 경우의 창에는 "허용/거부" 버튼만이 아니라 **암호 입력란이 같이 있다.** partition을 고쳐
+쓰려면 키체인을 열어야 하기 때문이고, 순수한 ACL 미등록과 구별되는 표식이다.
 
-이때 키체인 암호를 한 번 묻는다. 주의할 점은 이 명령이 암호를 **GUI 창이 아니라 tty에서**
-받는다는 것이다(`password to unlock …:`). 그래서 터미널 없이 돌리면 빈 값이 들어가 조용히
-실패하므로, 반드시 터미널에서 실행하거나 `KEYCHAIN_PASSWORD`로 넘겨야 한다.
+#### 거꾸로, 그래서 이 방식은 자가 복구된다
 
-```bash
-./scripts/build-app.sh --install --launch          # 터미널에서 암호 입력
-KEYCHAIN_PASSWORD='…' ./scripts/build-app.sh --install --launch   # 히스토리에 남는 점 감안
-```
+같은 쓰기가 반대로 작용한다. Claude Code가 항목을 덮어쓸 때마다 ACL에
+`/usr/bin/security (OK)`를, partition list에 `apple-tool:`을 **다시 심어 준다.**
+우리가 관리해야 할 빌드 시점 상태가 하나도 없다.
 
-#### 대가: 서명 키를 지켜야 한다
+- 앱의 서명 신원은 키체인 판정에 **참여하지 않는다.** ad-hoc으로 서명하든, `usagectl`을
+  `swift build`로 따로 빌드하든, `codesign`을 다시 걸든 접근이 깨지지 않는다.
+- 조회는 항목이 1,000개 넘게 쌓인 키체인에서도 **16ms**에 돌아온다(10회 중앙값).
 
-이 requirement에는 함정이 있다. `identifier`도 `certificate leaf` 해시도 **서명하는 쪽이
-정하는 값**이다. 그래서 개인키를 쓸 수 있는 프로세스는 아무 바이너리에나 이 앱과 똑같은
-requirement를 붙일 수 있고, 그 위조본은 사용자가 앱에 눌러 준 "항상 허용"을 그대로
-물려받아 Claude 토큰을 읽는다.
+#### 정직한 단서
 
-```bash
-# 개인키에 무프롬프트로 접근할 수 있다면 이게 통과한다
-cp /bin/echo /tmp/forge
-codesign -f -s "AIUsageBar Self Signed" -i com.daegun.aiusagebar /tmp/forge
-# → /tmp/forge 의 designated requirement가 앱과 한 글자도 다르지 않다
-```
+이 방법이 통한다는 것은 곧 **같은 사용자로 도는 어떤 코드든 `security` 한 줄로 이 토큰을
+읽을 수 있다**는 뜻이다. 새로 열리는 권한은 없다 — 이미 열려 있던 문으로 들어갈 뿐이다.
+키체인 ACL은 동일 사용자 코드에 대한 기밀성 경계가 아니었다. (Codex 토큰은
+`~/.codex/auth.json` 평문 파일이라 애초에 이 층이 없다.)
 
-ad-hoc 서명은 requirement가 cdhash라 이런 위조가 애초에 불가능했다. 편의를 얻는 대신
-그 성질을 버리는 것이므로, **개인키 보호가 이 방식의 전제 조건**이다.
+토큰은 파이프로만 오간다. 인자로 넘어가는 것은 서비스 이름과 계정 이름뿐이라 `ps`에 토큰이
+보이지 않고, 셸을 거치지 않고 절대 경로로 실행하므로 PATH에 심어진 가짜 `security`에
+속지 않는다.
 
-문제는 **명령행만으로는 그 보호를 걸 수 없다는 것**이다. `security import`에
-`-T /usr/bin/codesign`을 주지 않아도 macOS는 키를 무프롬프트로 내주고,
-`set-key-partition-list`는 partition만 건드리는데 codesign은 Apple 서명이라 어차피
-`apple:` partition을 통과한다. 기존 키의 ACL을 편집하는 CLI 명령은 없다.
+#### 예전 방식에서 넘어왔다면
 
-그래서 `create-signing-cert.sh`는 생성 직후 **실제로 위조를 시도해 보고**, 뚫리면
-GUI 설정을 안내한다. 키체인 접근.app에서 한 번만 하면 된다.
-
-> 로그인 키체인 → "나의 인증서" 탭 → `AIUsageBar Self Signed` 펼치기 → 개인 키 더블클릭
-> → **접근 제어** 탭 → "이 항목에 접근하려면 확인" 체크 → 저장
-
-이후 빌드할 때마다 승인 창이 뜬다. 여기서 **"항상 허용"을 누르면 이 보호가 도로
-풀린다.** "허용"을 눌러야 그 빌드에만 적용된다.
-
-이 설정을 할 생각이 없다면 인증서 방식을 쓰지 않는 편이 낫다. ad-hoc이 보안상 더 강하다
-(대신 재빌드마다 키체인 창이 뜬다).
+`scripts/create-signing-cert.sh`가 만들던 자체 서명 인증서는 더 이상 쓰이지 않는다.
+스크립트는 지웠지만 **개인키는 로그인 키체인에 남아 있다.** 그 키로 서명한 아무 바이너리나
+앱과 똑같은 designated requirement를 갖게 되므로, 쓰지 않을 거면 지우는 편이 낫다.
 
 ```bash
 security delete-identity -c "AIUsageBar Self Signed"
 ```
 
-(참고로 Codex 토큰은 `~/.codex/auth.json` 평문 파일이라 원래부터 이 보호가 없다.
-키체인 ACL로 보호되는 건 Claude 토큰뿐이다.)
+새 빌드를 설치한 **뒤에** 실행할 것(그 인증서로 서명된 앱이 아직 돌고 있으면 서명이 깨진다).
+키체인 **쓰기**라 승인 창이 한 번 뜬다.
 
-여기에 더해 **키체인을 두드리는 횟수 자체를 줄인다.** 조회는 5분마다지만 키체인은 그때마다
-읽지 않는다 — 받은 토큰을 만료 시각까지 메모리에 들고 있다가, 만료 1분 전에만 다시 읽는다
-(실제로는 Claude Code의 토큰 갱신 주기와 같다). 사용자가 창을 닫으면 30분간 다시 묻지
-않는다. 서버가 토큰을 거부하면(401/403) 그때는 캐시를 버리고 곧바로 다시 읽는다.
+항목에 남은 옛 AIUsageBar ACL 엔트리들은 **그대로 두는 편이 낫다.** 전부 검증 실패 상태라
+아무 권한도 주지 않는데, 키체인 접근.app으로 지우려 들면 그 쓰기가 partition list를 편집
+도구의 파티션으로 리셋해 `apple-tool:`을 날려 버릴 수 있다. 그러면 위 방식이 통째로 멈춘다.
 
-실수로 "거부"를 눌렀다면 30분을 기다릴 필요 없다. 드롭다운의 **갱신** 버튼이 5분 스로틀과
-30분 백오프를 모두 걷어내고 즉시 다시 시도한다.
+#### 그래도 키체인은 덜 두드린다
+
+조회는 5분마다지만 키체인은 그때마다 읽지 않는다 — 받은 토큰을 만료 시각까지 메모리에
+들고 있다가, 만료 1분 전에만 다시 읽는다(실제로는 Claude Code의 토큰 갱신 주기와 같다).
+서버가 토큰을 거부하면(401/403) 그때는 캐시를 버리고 곧바로 다시 읽는다.
+
+창이 없어졌어도 **백오프는 남겨 뒀다.** 로그인 키체인이 잠겨 있으면 이번엔 `security` 쪽이
+잠금 해제 창을 띄우고 무한정 기다린다. 그래서 조회가 10초를 넘기면 자식 프로세스를 끊고
+30분간 물러난다 — 5분마다 그 창을 다시 띄우면 없애려던 문제가 형태만 바꿔 되돌아온다.
+드롭다운의 **갱신** 버튼이 5분 스로틀과 30분 백오프를 모두 걷어내고 즉시 다시 시도한다.
 
 ### 폴백 3단계
 
@@ -248,8 +219,8 @@ Claude 한도는 롤링 5시간이 아니라 **첫 메시지에서 시작해 5�
 다시 읽고 중복 제거가 처리하므로 안전하다.
 
 **실시간 조회는 화면 갱신을 막지 않는다.** 백그라운드로 던져두고 직전 결과로 즉시 그린 뒤,
-응답이 오면 다시 그린다. 프로세스당 첫 키체인 접근에 4~5초가 걸리기 때문에(서명 검증)
-동기로 기다리면 시작할 때 UI가 멈춘다.
+응답이 오면 다시 그린다. 막는 쪽은 키체인이 아니라 네트워크다 — 키체인 읽기는 16ms로 싸고,
+`usagectl status` 한 번의 갱신 165ms 중 나머지가 두 서비스의 HTTP 조회다.
 
 ---
 
@@ -310,30 +281,13 @@ Xcode 프로젝트는 없다. SwiftPM만으로 `.app` 번들까지 만든다 (`s
 - **Gemini 등 구독형 서비스는 지원하지 않는다.** 공개된 사용량 조회 경로가 없다.
 - 로그 포맷이 바뀌면 파서를 고쳐야 한다. 파싱에 실패하면 조용히 0을 표시하지
   않고 메뉴바에 `!`를 띄운다.
-- **서명 인증서를 지우거나 다시 만들면** 키체인이 접근 허용을 한 번 더 묻는다. 인증서가
-  바뀌면 requirement도 바뀌기 때문이다. `create-signing-cert.sh`는 이미 인증서가 있으면
-  새로 만들지 않는다.
-- **`usagectl`을 `swift build`로 따로 빌드하면 ad-hoc 서명으로 되돌아간다.** SwiftPM이
-  링크할 때마다 서명을 새로 붙이기 때문이다. 그러면 CLI에 대해서만 키체인 창이 다시 뜬다.
-  `scripts/build-app.sh`가 앱과 CLI를 함께 빌드하고 서명하므로 그쪽을 쓰면 된다.
-- **서명 키를 "항상 허용"으로 열어 두면 위조가 가능해진다.** 위의
-  [대가: 서명 키를 지켜야 한다](#대가-서명-키를-지켜야-한다) 참고.
-- Claude Code가 토큰을 갱신할 때 키체인 항목을 통째로 다시 쓰면 항목에 걸린 허용 목록이
-  초기화될 수 있다. 이때는 서명과 무관하게 창이 한 번 더 뜬다.
-- **`build-app.sh`를 거치지 않고 `codesign`만 다시 걸면 partition list가 낡는다.**
-  ACL은 인증서 기준이라 통과하지만 partition은 cdhash 기준이라 어긋난다
-  ([partition list](#그런데-서명만으로는-부족하다--partition-list) 참고). 지금 상태는
-  이렇게 확인한다.
-
-  ```bash
-  # 앱의 현재 cdhash
-  codesign -dv --verbose=4 /Applications/AIUsageBar.app 2>&1 | grep '^CDHash='
-  # 키체인에 등록된 partition list
-  security dump-keychain -a ~/Library/Keychains/login.keychain-db \
-    | grep -A2 'partition_id' | grep cdhash
-  ```
-
-  두 해시가 다르면 다음 실행에서 창이 뜬다.
-- **로그인 키체인에 `Claude Code-credentials-<해시>` 항목이 수백 개 쌓여 있을 수 있다.**
-  Claude Code가 남기는 것으로, 이 앱은 접미사 없는 `Claude Code-credentials`만 읽으므로
-  동작에는 영향이 없다. 다만 `security dump-keychain` 출력이 그만큼 길어진다.
+- **로그인 키체인이 잠겨 있으면 실시간 조회가 멈춘다.** `security`가 잠금 해제 창을 띄우고
+  기다리기 때문이다. 10초 뒤 끊고 30분 물러난다. 이때 표시되는 메시지는 "키체인이 응답하지
+  않아 조회를 중단했습니다"이고, 잠금을 풀고 드롭다운의 **갱신**을 누르면 바로 붙는다.
+- **"Claude Code 로그인 정보를 찾지 못했습니다"는 여러 원인을 뭉갠다.** `security`는 항목
+  없음·키체인 파일 없음·홈 경로 어긋남을 모두 같은 종료 코드(44)로 낸다. 대개는 Claude Code
+  로그아웃 상태다.
+- **로그인 키체인에 `Claude Code-credentials-<해시>` 항목이 수백~천 단위로 쌓여 있을 수 있다**
+  (2026-08 실측 기준 1,000개 이상). Claude Code가 남기는 것으로, 이 앱은 `-s`로 접미사 없는
+  `Claude Code-credentials`에 정확히 일치하는 항목만 읽으므로 동작에는 영향이 없다. 그만큼
+  쌓여도 조회는 16ms에 돌아온다.

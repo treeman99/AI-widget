@@ -83,6 +83,46 @@ designated => identifier "com.daegun.aiusagebar" and certificate leaf = H"f8dad5
 바이너리가 바뀌어도 인증서는 그대로이므로 허용이 유지된다. Developer ID로 서명된 앱이
 업데이트 후에도 다시 묻지 않는 것과 같은 원리다.
 
+#### 그런데 서명만으로는 부족하다 — partition list
+
+인증서로 서명해 놓고도 창이 계속 뜬다면, 남은 원인은 거의 항상 이쪽이다. macOS는 키체인
+접근을 **두 단계로** 판정하는데, ACL의 applications 목록을 통과해도 그와 별개인
+**partition list**에서 다시 걸린다.
+
+```
+entry 1:                                     ← ACL: 인증서 기준이라 재빌드에도 유지된다
+    applications (11):
+        0: /Applications/AIUsageBar.app (OK)
+            requirement: identifier "com.daegun.aiusagebar" and certificate leaf = H"56fcfc13..."
+entry 3:                                     ← partition list: cdhash 라서 재빌드하면 깨진다
+    authorizations (1): partition_id
+    description: apple-tool:, cdhash:629e71d1...
+```
+
+"항상 허용"을 누르면 macOS는 ACL에는 designated requirement(인증서 기준)를 넣지만,
+partition list에는 **승인하던 순간 바이너리의 cdhash**를 박아 넣는다. 그래서 다시 빌드하면
+ACL은 여전히 맞는데 partition이 어긋나 창이 되돌아온다. 이 경우의 창에는 "허용/거부"
+버튼만이 아니라 **암호 입력란이 같이 있다** — partition을 고쳐 쓰려면 키체인을 열어야
+하기 때문이고, 순수한 ACL 미등록과 구별되는 표식이다.
+
+자체 서명 인증서에는 팀 ID가 없어서 재빌드에도 안 변하는 `teamid:` 항목을 쓸 수 없다.
+그래서 `build-app.sh`가 서명 직후 새 cdhash를 직접 등록한다.
+
+```bash
+security set-generic-password-partition-list \
+  -S "apple:,apple-tool:,cdhash:<앱>,cdhash:<usagectl>" \
+  -s "Claude Code-credentials" -a "$USER" ~/Library/Keychains/login.keychain-db
+```
+
+이때 키체인 암호를 한 번 묻는다. 주의할 점은 이 명령이 암호를 **GUI 창이 아니라 tty에서**
+받는다는 것이다(`password to unlock …:`). 그래서 터미널 없이 돌리면 빈 값이 들어가 조용히
+실패하므로, 반드시 터미널에서 실행하거나 `KEYCHAIN_PASSWORD`로 넘겨야 한다.
+
+```bash
+./scripts/build-app.sh --install --launch          # 터미널에서 암호 입력
+KEYCHAIN_PASSWORD='…' ./scripts/build-app.sh --install --launch   # 히스토리에 남는 점 감안
+```
+
 #### 대가: 서명 키를 지켜야 한다
 
 이 requirement에는 함정이 있다. `identifier`도 `certificate leaf` 해시도 **서명하는 쪽이
@@ -280,3 +320,20 @@ Xcode 프로젝트는 없다. SwiftPM만으로 `.app` 번들까지 만든다 (`s
   [대가: 서명 키를 지켜야 한다](#대가-서명-키를-지켜야-한다) 참고.
 - Claude Code가 토큰을 갱신할 때 키체인 항목을 통째로 다시 쓰면 항목에 걸린 허용 목록이
   초기화될 수 있다. 이때는 서명과 무관하게 창이 한 번 더 뜬다.
+- **`build-app.sh`를 거치지 않고 `codesign`만 다시 걸면 partition list가 낡는다.**
+  ACL은 인증서 기준이라 통과하지만 partition은 cdhash 기준이라 어긋난다
+  ([partition list](#그런데-서명만으로는-부족하다--partition-list) 참고). 지금 상태는
+  이렇게 확인한다.
+
+  ```bash
+  # 앱의 현재 cdhash
+  codesign -dv --verbose=4 /Applications/AIUsageBar.app 2>&1 | grep '^CDHash='
+  # 키체인에 등록된 partition list
+  security dump-keychain -a ~/Library/Keychains/login.keychain-db \
+    | grep -A2 'partition_id' | grep cdhash
+  ```
+
+  두 해시가 다르면 다음 실행에서 창이 뜬다.
+- **로그인 키체인에 `Claude Code-credentials-<해시>` 항목이 수백 개 쌓여 있을 수 있다.**
+  Claude Code가 남기는 것으로, 이 앱은 접미사 없는 `Claude Code-credentials`만 읽으므로
+  동작에는 영향이 없다. 다만 `security dump-keychain` 출력이 그만큼 길어진다.

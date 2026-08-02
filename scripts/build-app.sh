@@ -88,6 +88,59 @@ if [ "$SIGNED_WITH_CERT" -eq 1 ] && [ -x "$CLI" ]; then
   fi
 fi
 
+# 키체인 partition list 갱신.
+#
+# "항상 허용"을 눌러도 재빌드하면 창이 다시 뜨는 진짜 이유가 여기 있다. macOS는 키체인
+# 접근을 두 단계로 판정한다 — ACL의 applications 목록과, 그와 별개인 partition list다.
+# 앞의 것은 인증서 기준 requirement로 남아 재빌드해도 유지되지만(위 서명이 그 역할이다),
+# partition list에는 승인하던 순간 바이너리의 cdhash가 그대로 박힌다. 코드를 한 줄만
+# 고쳐 다시 빌드해도 cdhash가 달라지므로 partition 검사에서 떨어지고, 키체인은 다시
+# 묻는다. 그 창에 "허용/거부"뿐 아니라 암호 입력란이 같이 있는 것이 이 경우의 표식이다.
+#
+# 자체 서명 인증서에는 팀 ID가 없어 재빌드에도 안 변하는 teamid: 항목을 쓸 수 없다.
+# 그래서 빌드할 때마다 새 cdhash를 직접 등록한다. -S는 목록을 덮어쓰므로 애플 도구용
+# 항목(security 명령 등이 쓴다)도 매번 같이 넣어 준다.
+KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+KEYCHAIN_SERVICE="Claude Code-credentials"
+
+PARTITIONS="apple:,apple-tool:"
+for TARGET in "$BUNDLE" "$CLI"; do
+  [ -e "$TARGET" ] || continue
+  CDHASH="$(codesign -dv --verbose=4 "$TARGET" 2>&1 | awk -F= '/^CDHash=/{print $2}')"
+  [ -n "$CDHASH" ] && PARTITIONS="$PARTITIONS,cdhash:$CDHASH"
+done
+
+if security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$USER" "$KEYCHAIN" >/dev/null 2>&1; then
+  echo "▸ 키체인 partition list 갱신"
+  # 이 명령은 로그인 키체인 암호를 요구한다. -k 로 주지 않으면 GUI 창이 아니라 **tty에서**
+  # 직접 묻기 때문에(`password to unlock …:`), 파이프나 CI처럼 터미널이 없는 자리에서는
+  # 빈 값이 들어가 조용히 실패한다. 그래서 tty가 없으면 아예 시도하지 않고 안내만 한다.
+  # 실패해도 빌드 자체는 성공이므로 set -e 에 걸리지 않게 감싼다.
+  PARTITION_OK=0
+  if [ -n "${KEYCHAIN_PASSWORD:-}" ]; then
+    security set-generic-password-partition-list \
+      -S "$PARTITIONS" -s "$KEYCHAIN_SERVICE" -a "$USER" \
+      -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null 2>&1 && PARTITION_OK=1 || true
+  elif [ -t 0 ]; then
+    echo "  로그인 키체인 암호를 입력하세요 (앱 실행 중 뜨던 창을 없애기 위한 1회 입력)"
+    security set-generic-password-partition-list \
+      -S "$PARTITIONS" -s "$KEYCHAIN_SERVICE" -a "$USER" \
+      "$KEYCHAIN" >/dev/null 2>&1 && PARTITION_OK=1 || true
+  else
+    echo "  터미널이 없어 암호를 받을 수 없습니다 (건너뜀)"
+  fi
+
+  if [ "$PARTITION_OK" -eq 1 ]; then
+    echo "  등록됨: $PARTITIONS"
+  else
+    echo "  ! 갱신하지 못했습니다 — 앱 실행 시 접근 허용 창이 한 번 더 뜹니다."
+    echo "    터미널에서 다시: scripts/build-app.sh"
+    echo "    또는 암호를 넘겨서: KEYCHAIN_PASSWORD=… scripts/build-app.sh"
+  fi
+else
+  echo "▸ 키체인에 '$KEYCHAIN_SERVICE' 항목이 없어 partition 갱신을 건너뜁니다"
+fi
+
 echo "▸ 완료: $BUNDLE"
 
 if [ "$INSTALL" -eq 1 ]; then

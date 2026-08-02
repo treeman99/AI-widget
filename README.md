@@ -126,11 +126,31 @@ security delete-identity -c "AIUsageBar Self Signed"
 ```
 
 새 빌드를 설치한 **뒤에** 실행할 것(그 인증서로 서명된 앱이 아직 돌고 있으면 서명이 깨진다).
-키체인 **쓰기**라 승인 창이 한 번 뜬다.
+키체인 쓰기지만 실제로는 승인 창 없이 즉시 끝났다. 인증서와 개인키가 함께 사라지므로 그 키의
+ACL과 "접근하려면 확인" 설정도 같이 없어진다. 신뢰 설정은 `add-trusted-cert`로 걸어 뒀더라도
+가리킬 인증서가 없어져 남지 않는다(`security dump-trust-settings`로 확인 가능).
 
-항목에 남은 옛 AIUsageBar ACL 엔트리들은 **그대로 두는 편이 낫다.** 전부 검증 실패 상태라
-아무 권한도 주지 않는데, 키체인 접근.app으로 지우려 들면 그 쓰기가 partition list를 편집
-도구의 파티션으로 리셋해 `apple-tool:`을 날려 버릴 수 있다. 그러면 위 방식이 통째로 멈춘다.
+항목에 남는 것이 둘 있는데 **둘 다 건드릴 필요가 없다.**
+
+**ACL의 옛 AIUsageBar / usagectl 엔트리** — "항상 허용"을 누를 때마다 쌓인 것으로, 재빌드마다
+cdhash가 바뀌어 여러 개가 된다. 지금은 **두 겹으로 죽어 있다.** requirement 검증이 실패하고
+(`status -2147415734`), 설령 통과해도 partition list에서 다시 걸린다. 실제로 확인해 보면
+`swift-frontend`처럼 requirement가 `(OK)`인 항목조차 읽지 못한다.
+
+```swift
+SecKeychainSetUserInteractionAllowed(false)   // 창이 뜰 수 없게 막고 확인한다
+// … SecItemCopyMatching → status = -25293 (errSecAuthFailed)
+```
+
+지우는 방법이 없지는 않다 — `security dump-keychain -i`가 대화형 ACL 편집 모드다. 다만 항목을
+지정하는 옵션이 없어 키체인 전체(수백 개)를 하나씩 훑어야 하고, 키체인 접근.app으로 편집하면
+그 쓰기가 partition list를 편집 도구의 파티션으로 리셋해 `apple-tool:`을 날릴 수 있다. 얻는 것이
+없는데 현재 읽기 경로를 깨뜨릴 위험만 있다.
+
+**partition list에 박힌 옛 cdhash** — 이건 **저절로 사라진다.** Claude Code가 다음 토큰 갱신 때
+항목을 덮어쓰면서 partition list를 `apple-tool:` 하나로 리셋하기 때문이다. 창이 되돌아오게 만들던
+바로 그 동작이 여기서는 청소부 역할을 한다. 굳이 `set-generic-password-partition-list`로 손대면
+로그인 키체인 암호를 입력해야 하고, `apple-tool:`을 빠뜨리면 실시간 조회가 통째로 멈춘다.
 
 #### 그래도 키체인은 덜 두드린다
 

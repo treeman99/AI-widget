@@ -15,8 +15,8 @@ Claude 15%   Codex 38%
 ## 빠른 시작
 
 ```bash
-# 1) 앱과 CLI를 빌드하고 설치 + 실행
-./scripts/build-app.sh --install --launch
+# 1) 앱과 CLI를 빌드하고 설치 + 로그인 자동 실행 등록 (등록과 동시에 뜬다)
+./scripts/build-app.sh --install --register
 
 # 2) 기준선 산출 (과거 30일 로그 전체 스캔, 최초 1회)
 .build/release/usagectl calibrate
@@ -28,7 +28,83 @@ Claude 15%   Codex 38%
 키체인 접근 허용 창은 뜨지 않는다. 서명이나 빌드 순서에 신경 쓸 것도 없다
 ([키체인을 어떻게 읽는가](#키체인을-어떻게-읽는가) 참고).
 
-로그인할 때 자동 실행하려면 **시스템 설정 → 일반 → 로그인 항목**에 `AIUsageBar.app`을 추가한다.
+로그인할 때 자동 실행하는 것은 `--register`가 한다. **시스템 설정 → 일반 → 로그인
+항목은 쓰지 않는다** — 둘을 같이 걸면 메뉴바 아이콘이 두 개 뜰 수 있다
+([로그인 시 자동 실행](#로그인-시-자동-실행) 참고).
+
+---
+
+## 로그인 시 자동 실행
+
+`--register`가 `~/Library/LaunchAgents/com.daegun.aiusagebar.plist`를 쓰고
+`launchctl bootstrap gui/$(id -u)`로 올린다. 등록과 동시에 앱이 뜨므로 `--launch`는
+필요 없다. sudo는 어디에도 필요 없다.
+
+```bash
+./scripts/build-app.sh --install --register            # 등록 (몇 번을 돌려도 안전하다)
+./scripts/build-app.sh --unregister                    # 해제 (빌드하지 않는다)
+launchctl print gui/$(id -u)/com.daegun.aiusagebar     # 상태 확인
+```
+
+`--register`는 `--install`을 포함한다. plist에 `/Applications`의 **절대 경로**가
+박히기 때문이다 — 저장소 안 `build/`를 등록하면 다음 빌드의 `rm -rf`가 launchd가
+실행할 파일을 지워 버린다.
+
+### plist에서 설명이 필요한 것 넷
+
+| 키 | 값 | 이유 |
+|---|---|---|
+| `ProgramArguments` | 번들 안 실행 파일의 절대 경로 | `open -a`는 앱을 넘기고 곧바로 끝난다. launchd가 추적하던 프로세스가 1초 만에 사라진 것으로 보여 `KeepAlive` 판정이 무너진다 |
+| `KeepAlive` | `SuccessfulExit = false` | 드롭다운의 **종료** 버튼(`NSApp.terminate`)은 종료 코드 0으로 끝난다. `true`로 두면 launchd가 그 종료를 즉시 되돌려 버튼이 고장 난 것처럼 보인다. 0이 아닌 종료 — 즉 크래시 — 일 때만 되살린다 |
+| `ProcessType` | `Interactive` | 지정하지 않으면 launchd가 CPU와 I/O를 조이는 기본 제한을 건다. 수백 MB 로그를 훑는 앱이라 앱과 같은 대우가 필요하다 |
+| `AssociatedBundleIdentifiers` | 앱의 번들 ID | 없으면 로그인 항목 화면에 정체 불명의 항목으로 보인다. 사용자가 그걸 끄면 자동 실행이 조용히 죽는다 |
+
+`SuccessfulExit = false`는 이 앱만의 요령이 아니다. Apple 자신의 GUI 에이전트가 같은
+값을 쓴다 — `plutil -p /System/Library/LaunchAgents/com.apple.controlcenter.plist`,
+`com.apple.Finder.plist` 둘 다 `KeepAlive.SuccessfulExit = false`다.
+
+여기에는 전제가 하나 있다. 이 앱에는 `applicationShouldTerminate`가 없어 기본값
+`terminateNow`이고 `Sources/AIUsageBar` 어디에도 `exit(` 호출이 없다. 그래서 종료
+버튼이 정확히 0으로 끝난다. 나중에 `.terminateLater`를 쓰거나
+`applicationWillTerminate`에서 크래시가 나면 **그 순간 종료 버튼이 다시 고장 난 것처럼
+보인다.**
+
+### 로그인 항목과 겹치면 안 된다
+
+**시스템 설정의 로그인 항목에도 앱을 넣어 두면 로그인 때 아이콘이 두 개 뜰 수 있다.**
+방향에 따라 다르다 — LaunchServices(`open`, 로그인 항목)로 띄우면 이미 떠 있는
+인스턴스를 활성화하는 쪽으로 가지만(실측으로 확인했다), launchd는 LaunchServices를
+조회하지 않고 실행 파일을 직접 `exec`하므로 이미 떠 있어도 하나 더 만든다. 로그인
+직후에는 둘이 수백 ms 안에 동시에 출발해 어느 쪽이 먼저인지 정해져 있지 않다. 앱에는
+아직 단일 인스턴스 가드가 없어서 두 번째가 스스로 물러나지도 않는다.
+
+로그인 항목 목록은 BTM이 관리해 sudo 없이는 읽을 수 없어 `--register`가 대신 지워 줄
+수 없다. 대신 스크립트가 인스턴스 수를 세어 둘 이상이면 pid와 함께 경고한다. 세는
+시점은 **시작 직후**, 즉 아무것도 죽이기 전이다 — `--install`과 `--register`는 각각
+기존 인스턴스를 `pkill`로 정리하므로 그 뒤에서 세면 언제나 한 개로 보인다.
+`--launch`는 띄운 직후에 한 번 더 세서, 방금 만들어진 중복까지 본다.
+
+### 자잘한 규칙
+
+- **앱을 지우기 전에 `--unregister`.** 안 그러면 launchd가 없는 실행 파일을 10초마다
+  다시 띄우려 들고 스스로 포기하지 않는다. 스크립트는 돌 때마다 등록된 경로를 확인해
+  이 상태면 경고한다.
+- **`--install`은 `--register` 없이도 잡을 잠깐 내렸다 올린다.** launchd는 경로가
+  아니라 PID를 추적하므로, 돌고 있는 채로 번들을 지워도 옛 프로세스가 지워진 파일로
+  계속 돌고 launchd는 그걸 정상으로 본다 — "설치했는데 예전 버전이 그대로 돈다"가
+  된다. 그렇다고 `pkill`로 죽이면 그 SIGTERM이 "비정상 종료"로 읽혀 방금 지운 옛
+  바이너리가 되살아난다.
+- **등록된 상태의 `--launch`는 `open`이 아니라 `launchctl kickstart -k`로 간다.**
+  같은 이유다.
+- **종료 버튼으로 끈 뒤 로그아웃 없이 다시 켜려면**
+  `launchctl kickstart gui/$(id -u)/com.daegun.aiusagebar`.
+- **`--register`를 다시 돌리면 plist를 통째로 덮어쓴다.** 손으로 넣은 수정은 남지
+  않는다. 값을 바꾸려면 `scripts/build-app.sh`를 고친다.
+- **sudo로 돌리면 스크립트가 거부한다.** root로 등록하면 plist가 `/var/root`에 깔리고
+  `gui/0`에 붙어 사용자에게 아무 효과가 없다 — "등록 완료"를 찍고도 앱이 안 뜨는, 가장
+  진단하기 어려운 실패다.
+- 로그는 `~/Library/Logs/AIUsageBar.stdout.log`와 `.stderr.log`다. 등록했는데 메뉴바에
+  안 뜨면 여기와 `launchctl print gui/$(id -u)/com.daegun.aiusagebar`를 먼저 본다.
 
 ---
 
@@ -312,3 +388,15 @@ Xcode 프로젝트는 없다. SwiftPM만으로 `.app` 번들까지 만든다 (`s
   (2026-08 실측 기준 1,000개 이상). Claude Code가 남기는 것으로, 이 앱은 `-s`로 접미사 없는
   `Claude Code-credentials`에 정확히 일치하는 항목만 읽으므로 동작에는 영향이 없다. 그만큼
   쌓여도 조회는 16ms에 돌아온다.
+- **LaunchAgent와 로그인 항목을 동시에 걸면 메뉴바 아이콘이 두 개 뜰 수 있다.** 앱에
+  단일 인스턴스 가드가 없고, 로그인 항목 목록은 sudo 없이 읽을 수 없어 스크립트가
+  대신 정리해 줄 수도 없다. 지금은 실행 후 인스턴스 수를 세어 경고하는 것이 전부다.
+- **자동 실행 등록은 GUI 로그인 세션에서만 즉시 반영된다.** SSH 세션에는 `gui/$UID`
+  도메인이 없어(`launchctl print`가 112로 끝난다) 그 자리에서 올리지 못한다. plist는
+  설치되므로 다음 로그인 때 올라온다 — 스크립트는 그 사실을 알리고 성공으로 끝낸다.
+- **`~/Library/Logs/AIUsageBar.*.log`는 회전하지 않는다.** 앱이 직접 쓰는 것은 없어
+  평소엔 비어 있지만, 크래시 루프에 빠지면 launchd가 10초마다 되살리며 재기동 로그가
+  쌓인다. 줄이는 것은 지금 수동이다 — 커졌으면 직접 비운다.
+- **한 대를 여러 관리자 계정이 쓰면 `/Applications`는 공유지만 LaunchAgent는 계정마다
+  따로다.** A가 등록해 둔 상태에서 B가 `--install`을 돌리면 B는 A의 잡을 볼 수도 내릴
+  수도 없어, A의 세션에서 옛 바이너리가 계속 돈다. 스크립트가 막을 수 없다.

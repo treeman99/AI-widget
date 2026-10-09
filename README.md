@@ -1,13 +1,13 @@
 # AI Usage — macOS 메뉴바 위젯
 
-Claude Code와 Codex CLI의 구독 사용량을 메뉴바에 항상 띄워 둔다.
+Claude Code, Codex CLI, Antigravity CLI(Gemini)의 구독 사용량을 메뉴바에 항상 띄워 둔다.
 
 ```
-Claude 15%   Codex 38%
+Claude 15%   Codex 38%   Gemini 1%
 ```
 
 각 서비스의 **공식 사용량 엔드포인트를 5분마다 조회**해 실제 한도 사용률을 보여주고,
-조회가 안 되면 로컬 세션 로그 기반 추정으로 물러난다. 클릭하면 창별 사용률, 리셋까지
+조회가 안 되면 마지막 실측값이나 로컬 세션 로그 기반 추정으로 물러난다. 클릭하면 창별 사용률, 리셋까지
 남은 시간, 일별 사용량 차트, 모델 비중이 나온다.
 
 ---
@@ -116,10 +116,11 @@ launchctl print gui/$(id -u)/com.daegun.aiusagebar     # 상태 확인
 |---|---|
 | **Claude 한도 사용률** | `GET https://api.anthropic.com/api/oauth/usage` — Claude Code의 `/usage`가 쓰는 경로 |
 | **Codex 한도 사용률** | `GET https://chatgpt.com/backend-api/wham/usage` |
+| **Gemini 한도 사용률** | `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` — `agy -p /usage`가 쓰는 경로 |
 | **토큰량 · 일별 차트 · 모델 비중** | 로컬 세션 로그 (`~/.claude/projects/**`, `~/.codex/sessions/**`) |
 
-인증에는 Claude Code와 Codex가 로그인할 때 저장한 OAuth 토큰을 **읽기만** 해서 쓴다
-(키체인 `Claude Code-credentials`, `~/.codex/auth.json`). 토큰을 갱신하지는 않는다 —
+인증에는 Claude Code, Codex, Antigravity CLI가 로그인할 때 저장한 OAuth 토큰을 **읽기만** 해서 쓴다
+(키체인 `Claude Code-credentials`, `~/.codex/auth.json`, 키체인 `gemini` / 계정 `antigravity`). 토큰을 갱신하지는 않는다 —
 refresh token을 회전시키면 각 도구 자신의 세션이 깨질 수 있다. 이 원칙은 아래에서 한 번 더
 중요해진다. 키체인 접근이 유지되는 것 자체가 **Claude Code 자신의 쓰기**에 기대고 있다.
 
@@ -250,7 +251,7 @@ SecKeychainSetUserInteractionAllowed(false)   // 창이 뜰 수 없게 막고 �
 3. **추정** (배지) — 로컬 로그를 기준선으로 환산한 값. 공식 한도가 아니다
 
 토큰 만료로 실패하면 해당 도구를 한 번 실행하면 토큰이 갱신되어 다시 붙는다.
-설정에서 실시간 조회를 끄면 3단계만 쓴다.
+설정에서 실시간 조회를 끄면 3단계만 쓴다. Gemini에는 3단계가 없다 — 실시간 조회를 끄면 아무것도 표시하지 않는다.
 
 ### 기준선 (추정 단계에서만 쓰임)
 
@@ -260,6 +261,66 @@ SecKeychainSetUserInteractionAllowed(false)   // 창이 뜰 수 없게 막고 �
 
 기준선은 `usagectl calibrate`로 산출하고, 설정에서 직접 수정할 수 있다. 자동 캘리브레이션을
 켜두면 새 피크가 나올 때마다 기준선이 올라간다(실시간 값이 있을 때는 건드리지 않는다).
+
+### Gemini (Antigravity CLI)
+
+Gemini는 Antigravity CLI(`agy`)의 한도를 보여준다. 로컬 로그 집계가 없는 **실시간 전용** 서비스다.
+`agy -p /usage`가 같은 숫자를 탭 구분 텍스트로 내므로 대조는 그걸로 한다.
+
+```
+Gemini (Antigravity) · Google AI Pro
+  ░░░░░░░░░░░░░░  4%  5시간 (Gemini) · 4시간 44분 후 리셋
+  ░░░░░░░░░░░░░░  1%  주간 (Gemini) · 6일 18시간 후 리셋
+  ░░░░░░░░░░░░░░  0%  5시간 (Claude·GPT)
+  ░░░░░░░░░░░░░░  0%  주간 (Claude·GPT)
+```
+
+#### 무엇을 읽는가
+
+`retrieveUserQuotaSummary`는 한도를 **두 풀 × 두 창**으로 준다. Gemini 풀(Flash, Pro)과 Claude·GPT 풀
+(Opus, Sonnet, GPT-OSS)이 각각 5시간 한도와 주간 한도를 갖고, 같은 풀의 모델은 한도를 나눠 쓰며
+토큰 비용에 비례해 깎인다. Claude·GPT 풀은 0%여도 늘 보여준다 — Antigravity가 주는 별도 풀이라 일부러
+골라 쓰는 사람에게는 그쪽 숫자가 본론이다. 메뉴바 숫자는 Gemini 풀의 5시간 사용률이다.
+
+| 응답의 사정 | 위젯의 처리 |
+|---|---|
+| 값이 **남은** 비율(`remainingFraction`)이다 | `(1 − 남은 비율) × 100`을 사용률로 쓴다 |
+| proto3 JSON이라 0인 필드를 생략한다 | `remainingFraction`이 없는 버킷은 다 쓴 것(100%)으로 읽는다. 모르는 값으로 건너뛰면 정작 한도에 걸린 순간 게이지가 사라진다 |
+| 안 쓴 버킷의 `resetTime`은 조회할 때마다 "지금 + 창 길이"로 미끄러진다 | 안 쓴 버킷은 리셋 시각을 표시하지 않는다 |
+| User-Agent에 `antigravity`가 없으면 유효한 토큰에도 403(`You do not have a valid license of this product`)을 준다 | `AIUsageBar (antigravity)`를 보낸다. 앱 이름은 그대로 밝히고 어느 제품의 한도인지만 덧붙인다 |
+
+플랜 라벨은 `loadCodeAssist`의 `paidTier.name`이다. 한 번 받으면 다시 묻지 않고, 못 받았으면 한 시간 뒤에
+다시 묻는다. 응답에 이메일이 실려 오므로 이름 외에는 꺼내지 않는다.
+
+#### 토큰
+
+로그인 키체인의 generic password, 서비스 `gemini` / 계정 `antigravity`다. agy는 zalando/go-keyring을
+쓰고, 이 라이브러리는 `/usr/bin/security add-generic-password -U`로 저장한다. 값은 `go-keyring-base64:`
+뒤에 base64로 감싼 JSON이다.
+
+읽는 방법은 Claude와 같다([키체인을 어떻게 읽는가](#키체인을-어떻게-읽는가)). 차이는 자가 복구조차 필요
+없다는 것이다. 항목을 만든 주체가 처음부터 `security`라서 ACL의 decrypt 허용 앱이 `/usr/bin/security (OK)`
+하나, partition list가 `apple-tool:`이다. agy가 토큰을 갱신해 다시 써도 그대로임을 확인했다.
+
+**access token 수명은 1시간이고 agy가 실행될 때만 갱신된다.** agy는 시작할 때 만료된 토큰을 갱신해 키체인에
+다시 쓴다(실측). 위젯은 원칙대로 토큰을 갱신하지 않고 refresh token은 꺼내지도 않는다. 그래서:
+
+- 만료된 걸 알면 네트워크를 타지 않는다. 5분마다 키체인만 다시 읽다가, agy가 갱신해 두면 다음 주기에 붙는다.
+- 그동안은 마지막 실측값을 "마지막 관측" 배지와 "HH:mm 기준"으로 보여주고, 상세에
+  "실시간 조회: 토큰 만료 · agy 실행 시 재개"를 띄운다. agy를 안 쓰는 동안에는 사용량도 늘지 않으니 대개
+  그대로 맞다. 리셋 시각이 지난 창은 0%로 내린다.
+- "실시간"으로 인정하는 창은 `max(2 × 조회 간격, 10분)`이다. Claude·Codex처럼 `staleThreshold`(24시간)를
+  쓰면 몇 시간 전 값이 실시간 배지를 달고 나온다. 여기서는 조회 실패가 평상시이기 때문이다.
+- 마지막 실측값은 `state-gemini.json`에 남겨 토큰이 죽은 채 앱을 다시 띄워도 빈 칸이 되지 않는다.
+  `usagectl reset`은 이 파일도 지운다 — 다시 만들 수 없는 값이지만, 계정을 바꾼 뒤 옛 숫자를 걷어낼
+  방법이 이것뿐이다. 앱의 "전체 다시 스캔"은 건드리지 않는다.
+
+`usagectl debug`는 토큰 만료 시각과 마지막 관측 시각을 보여준다(토큰 값은 찍지 않는다).
+
+#### 기존 설정에서 켜지는 방식
+
+`config.json`에 `knownServices`가 생겼다. 이 키가 없는 예전 설정은 그때 없던 서비스(Gemini)를 켜서 들이고,
+목록을 최신으로 맞춘다. 그 뒤 설정에서 끈 서비스는 계속 꺼져 있다.
 
 ---
 
@@ -329,6 +390,7 @@ Sources/
 │   ├── NDJSONScanner   증분 리더 + 파일 탐색
 │   ├── ClaudeCodeProvider  dedup → 5시간 블록 집계
 │   ├── CodexProvider   rate_limits 추출 + 만료 판정
+│   ├── GeminiProvider  실시간 전용 제공자
 │   ├── SessionBlock    5시간 블록 알고리즘
 │   ├── TokenWeight     모델 계수 / 가중 토큰
 │   ├── Baseline        기준선 캘리브레이션
@@ -375,7 +437,14 @@ Xcode 프로젝트는 없다. SwiftPM만으로 `.app` 번들까지 만든다 (`s
 - **토큰이 만료되면 실시간 조회가 멈춘다.** 토큰 갱신은 일부러 하지 않는다 —
   refresh token을 회전시키면 Claude Code나 Codex 자신의 세션이 깨질 수 있다.
   해당 도구를 한 번 실행하면 다시 붙는다.
-- **Gemini 등 구독형 서비스는 지원하지 않는다.** 공개된 사용량 조회 경로가 없다.
+- **Gemini는 agy를 한 시간 넘게 안 쓰면 실시간 조회가 멈춘다.** 토큰 수명이 1시간이고 agy만 갱신한다.
+  그동안은 마지막 실측값을 보여주는데, Antigravity IDE처럼 같은 계정의 다른 곳에서 쓴 양은 그 값에
+  반영되지 않는다. agy를 한 번 실행하면 다음 주기에 붙는다. agy가 한 시간 넘게 **계속 떠 있을 때**
+  갱신한 토큰을 키체인에 다시 쓰는지는 아직 확인하지 못했다(시작할 때 쓰는 것만 확인했다).
+- **Gemini에는 토큰 집계·일별 차트·모델 비중이 없다.** agy의 대화 기록
+  (`~/.gemini/antigravity-cli/conversations/*.db`)이 SQLite 안의 protobuf라 읽지 않는다.
+- **Gemini 조회는 User-Agent 검사에 기대고 있다.** 서버가 검사를 바꾸면(예: agy의 정확한 버전 문자열을
+  요구하면) 403으로 실패하고 마지막 관측값으로 물러난다.
 - 로그 포맷이 바뀌면 파서를 고쳐야 한다. 파싱에 실패하면 조용히 0을 표시하지
   않고 메뉴바에 `!`를 띄운다.
 - **로그인 키체인이 잠겨 있으면 실시간 조회가 멈춘다.** `security`가 잠금 해제 창을 띄우고

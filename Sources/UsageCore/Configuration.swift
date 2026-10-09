@@ -49,6 +49,13 @@ public struct AppConfig: Codable, Sendable, Equatable {
     /// 주기 갱신 간격(초). 파일 변경 감시가 별도로 즉시 갱신을 트리거한다.
     public var refreshInterval: TimeInterval
     public var enabledServices: [ServiceID]
+    /// 이 설정 파일이 이미 "본" 서비스. 새 서비스를 기존 사용자에게 켜 주는 데 쓴다.
+    ///
+    /// `enabledServices`만으로는 "사용자가 끈 서비스"와 "설정을 저장할 때 아직 없던 서비스"를
+    /// 구분할 수 없다. Gemini가 생기기 전의 설정은 `["claude-code","codex"]`라, 그대로 두면
+    /// Gemini는 사용자가 고른 적도 없이 영영 꺼진 채다. 디코딩할 때 여기 없는 서비스만 켜고
+    /// 목록을 최신으로 맞추므로, 나중에 사용자가 끈 서비스는 계속 꺼져 있다.
+    public var knownServices: [ServiceID]
     /// 구독 플랜 표시용 라벨.
     public var claudePlanLabel: String
     /// 이 시간(초)보다 오래된 값은 stale로 표시한다.
@@ -75,6 +82,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         self.thresholds = thresholds
         self.refreshInterval = refreshInterval
         self.enabledServices = enabledServices
+        self.knownServices = ServiceID.allCases
         self.claudePlanLabel = claudePlanLabel
         self.staleThreshold = staleThreshold
         self.useLiveAPI = useLiveAPI
@@ -90,10 +98,24 @@ public struct AppConfig: Codable, Sendable, Equatable {
         try JSONStore.save(self, to: Paths.configFile)
     }
 
+    /// `knownServices`가 생기기 전의 설정 파일이 알던 서비스.
+    static let legacyKnownServices: [ServiceID] = [.claudeCode, .codex]
+
     // 이후에 필드가 추가돼도 기존 설정 파일을 계속 읽을 수 있게 모든 키를 옵셔널로 디코딩한다.
     private enum CodingKeys: String, CodingKey {
-        case baselines, thresholds, refreshInterval, enabledServices, claudePlanLabel, staleThreshold
+        case baselines, thresholds, refreshInterval, enabledServices, knownServices, claudePlanLabel, staleThreshold
         case useLiveAPI, liveRefreshInterval, historyDays
+    }
+
+    /// 서비스 목록을 문자열로 읽고 모르는 값은 버린다.
+    ///
+    /// `[ServiceID]`로 바로 읽으면 모르는 이름 하나(더 새 버전이 저장한 서비스 등)에 디코딩
+    /// 전체가 실패하고, `load()`가 기본값으로 물러나면서 기준선까지 잃는다.
+    private static func decodeServices(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> [ServiceID]? {
+        try container.decodeIfPresent([String].self, forKey: key)?.compactMap(ServiceID.init(rawValue:))
     }
 
     public init(from decoder: Decoder) throws {
@@ -101,7 +123,14 @@ public struct AppConfig: Codable, Sendable, Equatable {
         baselines = try container.decodeIfPresent(Baselines.self, forKey: .baselines) ?? .fallback
         thresholds = try container.decodeIfPresent(ColorThresholds.self, forKey: .thresholds) ?? ColorThresholds()
         refreshInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .refreshInterval) ?? 60
-        enabledServices = try container.decodeIfPresent([ServiceID].self, forKey: .enabledServices) ?? ServiceID.allCases
+        let enabled = try Self.decodeServices(container, forKey: .enabledServices) ?? ServiceID.allCases
+        let known = try Self.decodeServices(container, forKey: .knownServices) ?? Self.legacyKnownServices
+        // 이 파일이 처음 보는 서비스는 켜서 들인다. 순서는 allCases를 따른다.
+        let unseen = ServiceID.allCases.filter { !known.contains($0) }
+        enabledServices = unseen.isEmpty
+            ? enabled
+            : ServiceID.allCases.filter { enabled.contains($0) || unseen.contains($0) }
+        knownServices = ServiceID.allCases
         claudePlanLabel = try container.decodeIfPresent(String.self, forKey: .claudePlanLabel) ?? "Max 5x"
         staleThreshold = try container.decodeIfPresent(TimeInterval.self, forKey: .staleThreshold) ?? 24 * 3600
         useLiveAPI = try container.decodeIfPresent(Bool.self, forKey: .useLiveAPI) ?? true

@@ -8,27 +8,32 @@ public final class UsageMonitor: @unchecked Sendable {
     public private(set) var config: AppConfig
     private let claude: ClaudeCodeProvider
     private let codex: CodexProvider
+    private let gemini: GeminiProvider
 
     public init(config: AppConfig = AppConfig.load()) {
         self.config = config
         self.claude = ClaudeCodeProvider(config: config)
         self.codex = CodexProvider(config: config)
+        self.gemini = GeminiProvider(config: config)
     }
 
     public var claudeProvider: ClaudeCodeProvider { claude }
     public var codexProvider: CodexProvider { codex }
+    public var geminiProvider: GeminiProvider { gemini }
 
     public func updateConfig(_ config: AppConfig) {
         self.config = config
         claude.updateConfig(config)
         codex.updateConfig(config)
+        gemini.updateConfig(config)
     }
 
-    /// 실시간 결과가 도착했을 때 불린다. 두 서비스 모두에 같은 핸들러가 걸린다.
+    /// 실시간 결과가 도착했을 때 불린다. 모든 서비스에 같은 핸들러가 걸린다.
     public var onLiveUpdate: (@Sendable () -> Void)? {
         didSet {
             claude.onLiveUpdate = onLiveUpdate
             codex.onLiveUpdate = onLiveUpdate
+            gemini.onLiveUpdate = onLiveUpdate
         }
     }
 
@@ -37,10 +42,10 @@ public final class UsageMonitor: @unchecked Sendable {
     /// 메뉴바 앱은 이걸 부르지 않는다 — 조회는 백그라운드로 던져두고 화면은 즉시 그린다.
     public func primeLiveUsage(now: Date = Date()) {
         for id in ServiceID.allCases where config.enabledServices.contains(id) {
-            if id == .claudeCode {
-                claude.primeLiveUsage(now: now)
-            } else {
-                codex.primeLiveUsage(now: now)
+            switch id {
+            case .claudeCode: claude.primeLiveUsage(now: now)
+            case .codex: codex.primeLiveUsage(now: now)
+            case .gemini: gemini.primeLiveUsage(now: now)
             }
         }
     }
@@ -49,13 +54,14 @@ public final class UsageMonitor: @unchecked Sendable {
     ///
     /// 평소 갱신(`refresh`)은 5분 간격 스로틀을 지키고, 키체인 접근이 거부된 뒤에는 30분간
     /// 물러난다. 사용자가 버튼을 누른 건 "지금 다시"라는 뜻이므로 두 제약을 모두 푼다.
+    /// 키체인 백오프는 Claude와 Gemini가 공유하므로 한 번 풀면 둘 다 다시 시도한다.
     public func forceLiveRefresh(now: Date = Date()) {
-        Credentials.resetClaudeBackoff()
+        Credentials.resetKeychainBackoff()
         for id in ServiceID.allCases where config.enabledServices.contains(id) {
-            if id == .claudeCode {
-                claude.forceLiveRefresh(now: now)
-            } else {
-                codex.forceLiveRefresh(now: now)
+            switch id {
+            case .claudeCode: claude.forceLiveRefresh(now: now)
+            case .codex: codex.forceLiveRefresh(now: now)
+            case .gemini: gemini.forceLiveRefresh(now: now)
             }
         }
     }
@@ -66,7 +72,12 @@ public final class UsageMonitor: @unchecked Sendable {
         var services = [ServiceSnapshot]()
 
         for id in ServiceID.allCases where config.enabledServices.contains(id) {
-            let provider: UsageProvider = (id == .claudeCode) ? claude : codex
+            let provider: UsageProvider
+            switch id {
+            case .claudeCode: provider = claude
+            case .codex: provider = codex
+            case .gemini: provider = gemini
+            }
             do {
                 var snapshot = try provider.snapshot(now: now)
                 if id == .claudeCode {

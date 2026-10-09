@@ -67,7 +67,7 @@ struct SettingsView: View {
                     )
                     .disabled(!draft.useLiveAPI)
 
-                    Text("Claude Code와 Codex가 로그인할 때 저장한 토큰으로 각 서비스의 사용량을 조회합니다. 성공하면 실제 한도 사용률을, 실패하면 마지막 실측값 → 로컬 추정 순으로 표시합니다.")
+                    Text("Claude Code, Codex, Antigravity CLI가 로그인할 때 저장한 토큰으로 각 서비스의 사용량을 조회합니다. 성공하면 실제 한도 사용률을, 실패하면 마지막 실측값 → 로컬 추정 순으로 표시합니다. Gemini는 로컬 추정이 없고 토큰이 agy를 실행할 때만 갱신되므로, agy를 한 시간 넘게 쓰지 않으면 마지막 실측값을 보여줍니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

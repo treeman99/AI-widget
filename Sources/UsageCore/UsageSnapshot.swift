@@ -4,11 +4,13 @@ import Foundation
 public enum ServiceID: String, Codable, Sendable, CaseIterable {
     case claudeCode = "claude-code"
     case codex
+    case gemini
 
     public var displayName: String {
         switch self {
         case .claudeCode: return "Claude Code"
         case .codex: return "Codex"
+        case .gemini: return "Gemini (Antigravity)"
         }
     }
 
@@ -20,6 +22,7 @@ public enum ServiceID: String, Codable, Sendable, CaseIterable {
         switch self {
         case .claudeCode: return "Claude"
         case .codex: return "Codex"
+        case .gemini: return "Gemini"
         }
     }
 }

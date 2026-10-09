@@ -90,6 +90,18 @@ public final class LiveUsageCache: @unchecked Sendable {
         if succeeded { onUpdate?() }
     }
 
+    /// 디스크에 남겨 둔 지난 결과로 채운다. 이미 결과가 있으면 건드리지 않는다.
+    ///
+    /// `lastAttemptAt`은 그대로 둔다. 불러온 값은 관측일 뿐 이번 프로세스의 시도가 아니므로,
+    /// 첫 조회는 간격을 기다리지 않고 바로 돌아야 한다.
+    public func seed(_ result: LiveUsageResult) {
+        lock.withLock {
+            if storedResult == nil {
+                storedResult = result
+            }
+        }
+    }
+
     public func reset() {
         lock.withLock {
             storedResult = nil

@@ -1,9 +1,9 @@
 import Foundation
 
-/// Claude Code / Codex가 로그인할 때 저장해 둔 OAuth 자격증명을 **읽기만** 한다.
+/// Claude Code / Codex / Antigravity CLI가 로그인할 때 저장해 둔 OAuth 자격증명을 **읽기만** 한다.
 ///
 /// 토큰을 갱신하지는 않는다. 갱신은 refresh token을 회전시키기 때문에, 우리가 끼어들면
-/// Claude Code나 Codex 자신의 세션을 깨뜨릴 수 있다. 만료되면 실시간 조회를 포기하고
+/// 각 CLI 자신의 세션을 깨뜨릴 수 있다. 만료되면 실시간 조회를 포기하고
 /// 마지막 값이나 로컬 추정으로 물러난다.
 public enum Credentials {
 
@@ -43,6 +43,19 @@ public enum Credentials {
         public let accountId: String?
     }
 
+    public struct Gemini: Sendable, Equatable {
+        public let accessToken: String
+        /// access token 수명은 1시간이고, agy가 실행될 때만 갱신된다.
+        public let expiresAt: Date?
+
+        public var isExpired: Bool { isExpired(at: Date()) }
+
+        public func isExpired(at now: Date) -> Bool {
+            guard let expiresAt else { return false }
+            return expiresAt <= now
+        }
+    }
+
     // MARK: - Claude Code (키체인)
 
     /// 키체인 항목 이름. Claude Code가 로그인 시 여기에 저장한다.
@@ -52,6 +65,7 @@ public enum Credentials {
     ///
     /// 막혔다는 건 대개 로그인 키체인이 잠겨 있어 `security`가 잠금 해제 창을 띄웠다는
     /// 뜻이다. 다음 주기에 또 물어보면 같은 창이 5분마다 되돌아오므로 한동안 물러난다.
+    /// 백오프는 항목이 아니라 키체인 단위다 (`readKeychainValue` 참고).
     public static let deniedBackoff: TimeInterval = 30 * 60
 
     /// `expiresAt`이 없는 항목을 만났을 때 캐시를 믿어 주는 시간.
@@ -63,7 +77,10 @@ public enum Credentials {
     private static let lock = NSLock()
     private static var cachedClaude: Claude?
     private static var cachedClaudeAt: Date?
-    private static var claudeBackoffUntil: Date?
+    private static var cachedGemini: Gemini?
+    private static var cachedGeminiAt: Date?
+    /// 로그인 키체인 전체에 거는 백오프. Claude와 Gemini가 함께 쓴다.
+    private static var keychainBackoffUntil: Date?
 
     /// 키체인에서 Claude Code 자격증명을 읽는다.
     ///
@@ -89,6 +106,137 @@ public enum Credentials {
             return usable
         }
 
+        let read = try readKeychainValue(
+            service: claudeKeychainService,
+            account: account,
+            missingMessage: "Claude Code 로그인 정보를 찾지 못했습니다",
+            now: now
+        )
+        guard let credentials = parseClaude(read.value) else {
+            throw LiveUsageError.credentialsUnavailable("키체인 항목에서 accessToken을 찾지 못했습니다")
+        }
+        storeClaude(credentials, at: read.respondedAt)
+        return credentials
+    }
+
+    /// 서버가 토큰을 거부했다. 들고 있던 값은 죽었으므로 버린다.
+    public static func invalidateClaudeCache() {
+        lock.lock()
+        defer { lock.unlock() }
+        cachedClaude = nil
+        cachedClaudeAt = nil
+    }
+
+    /// 사용자가 드롭다운의 '갱신'을 눌렀을 때 백오프를 걷어낸다
+    /// (`UsageMonitor.forceLiveRefresh`가 부른다). 명시적으로 다시 시도하겠다는 뜻이므로
+    /// 30분을 기다리지 않는다. 백오프가 키체인 단위라 Claude와 Gemini가 함께 풀린다.
+    public static func resetKeychainBackoff() {
+        lock.lock()
+        defer { lock.unlock() }
+        keychainBackoffUntil = nil
+    }
+
+    /// 아직 쓸 수 있는 캐시. 만료됐거나 만료가 코앞이면 nil.
+    private static func usableCachedClaude(now: Date) -> Claude? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let cachedClaude, let cachedClaudeAt,
+              isUsable(expiresAt: cachedClaude.expiresAt, cachedAt: cachedClaudeAt, now: now)
+        else { return nil }
+        return cachedClaude
+    }
+
+    private static func storeClaude(_ credentials: Claude, at date: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        cachedClaude = credentials
+        cachedClaudeAt = date
+        // 읽기에 성공했다는 건 접근이 허용됐다는 뜻이다.
+        keychainBackoffUntil = nil
+    }
+
+    /// 만료가 코앞이면 버리고 다시 읽는다. CLI가 그 사이 갱신해 뒀을 값을 받는다.
+    private static func isUsable(expiresAt: Date?, cachedAt: Date, now: Date) -> Bool {
+        if let expiresAt {
+            return expiresAt.timeIntervalSince(now) > expiryMargin
+        }
+        // 만료 시각을 모르면 오래 믿지 않는다.
+        return now.timeIntervalSince(cachedAt) < blindCacheTTL
+    }
+
+    // MARK: - Gemini / Antigravity CLI (키체인)
+
+    /// Antigravity CLI(`agy`)가 로그인할 때 저장하는 항목. agy가 쓰는 zalando/go-keyring이
+    /// `security add-generic-password -U -s gemini -a antigravity`로 쓴다.
+    public static let geminiKeychainService = "gemini"
+    public static let geminiKeychainAccount = "antigravity"
+
+    /// 키체인에서 Antigravity CLI 자격증명을 읽는다.
+    ///
+    /// Claude와 같은 길(`/usr/bin/security`)을 탄다. go-keyring도 저장할 때 `security`를
+    /// 띄우므로 agy가 쓸 때마다 항목 ACL에 `/usr/bin/security (OK)`가, partition list에
+    /// `apple-tool:`이 다시 심긴다 — 창 없이 읽히는 이유가 Claude와 똑같다.
+    ///
+    /// access token은 1시간이면 죽고 agy가 실행될 때만 갱신된다. 그래도 직접 갱신하지 않는다
+    /// (파일 상단 원칙). 만료된 토큰도 그대로 돌려주고, 네트워크를 탈지는 호출자가 정한다.
+    /// 만료가 코앞인 값은 캐시에서 내주지 않으므로, 만료된 동안에는 주기마다 키체인을 다시
+    /// 읽어 agy가 그 사이 갱신해 둔 토큰을 바로 집어 온다.
+    public static func gemini(now: Date = Date()) throws -> Gemini {
+        if let usable = usableCachedGemini(now: now) {
+            return usable
+        }
+
+        let read = try readKeychainValue(
+            service: geminiKeychainService,
+            account: geminiKeychainAccount,
+            missingMessage: "Antigravity CLI 로그인 정보를 찾지 못했습니다 (agy로 로그인하세요)",
+            now: now
+        )
+        guard let credentials = parseGemini(read.value) else {
+            throw LiveUsageError.credentialsUnavailable("키체인 항목에서 access_token을 찾지 못했습니다")
+        }
+        storeGemini(credentials, at: read.respondedAt)
+        return credentials
+    }
+
+    /// 서버가 토큰을 거부했다. 들고 있던 값은 죽었으므로 버린다.
+    public static func invalidateGeminiCache() {
+        lock.lock()
+        defer { lock.unlock() }
+        cachedGemini = nil
+        cachedGeminiAt = nil
+    }
+
+    private static func usableCachedGemini(now: Date) -> Gemini? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let cachedGemini, let cachedGeminiAt,
+              isUsable(expiresAt: cachedGemini.expiresAt, cachedAt: cachedGeminiAt, now: now)
+        else { return nil }
+        return cachedGemini
+    }
+
+    private static func storeGemini(_ credentials: Gemini, at date: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        cachedGemini = credentials
+        cachedGeminiAt = date
+        keychainBackoffUntil = nil
+    }
+
+    // MARK: - 키체인 공통
+
+    /// `security find-generic-password`로 항목 값 하나를 읽는다.
+    ///
+    /// 백오프는 항목이 아니라 **키체인 단위**로 공유한다. 잠긴 로그인 키체인은 어느 항목을
+    /// 읽든 같은 잠금 해제 창을 띄운다. 항목마다 따로 물러나면 Claude 조회가 막혀 물러난
+    /// 직후 Gemini 조회가 같은 창을 다시 띄운다 — 없애려던 창이 두 배로 돌아온다.
+    private static func readKeychainValue(
+        service: String,
+        account: String,
+        missingMessage: String,
+        now: Date
+    ) throws -> (value: Data, respondedAt: Date) {
         if let until = backoffDeadline(), until > now {
             let minutes = max(1, Int((until.timeIntervalSince(now) / 60).rounded(.up)))
             throw LiveUsageError.credentialsUnavailable(
@@ -106,9 +254,9 @@ public enum Credentials {
         do {
             run = try runSecurity([
                 "find-generic-password",
-                "-s", claudeKeychainService,  // 정확 일치다. 접미사가 붙은 항목 수백 개는 안 걸린다.
+                "-s", service,  // 정확 일치다. Claude Code가 만드는 접미사 붙은 항목 수백 개는 안 걸린다.
                 "-a", account,
-                "-w",                         // 값은 stdout으로만 온다. `-g`는 stderr로 흘리므로 쓰지 않는다.
+                "-w",           // 값은 stdout으로만 온다. `-g`는 stderr로 흘리므로 쓰지 않는다.
             ])
         } catch SecurityFailure.stalled {
             beginBackoff(from: Date())
@@ -130,7 +278,7 @@ public enum Credentials {
                 // 항목 없음, 키체인 파일 없음, HOME이 어긋남이 모두 이 코드로 온다. 사용자가
                 // 취할 행동이 같으므로 구분하지 않는다. 백오프도 걸지 않는다 — 창을 띄우지
                 // 않고 즉시 끝나므로, 다시 로그인하면 다음 주기에 저절로 복구된다.
-                throw LiveUsageError.credentialsUnavailable("Claude Code 로그인 정보를 찾지 못했습니다")
+                throw LiveUsageError.credentialsUnavailable(missingMessage)
             case SecurityExit.userCanceled, SecurityExit.authFailed, SecurityExit.interactionNotAllowed:
                 beginBackoff(from: respondedAt)
                 throw LiveUsageError.credentialsUnavailable("키체인 접근이 거부됐습니다")
@@ -144,61 +292,19 @@ public enum Credentials {
             }
         }
 
-        guard let credentials = parseClaude(run.output) else {
-            throw LiveUsageError.credentialsUnavailable("키체인 항목에서 accessToken을 찾지 못했습니다")
-        }
-        storeClaude(credentials, at: respondedAt)
-        return credentials
-    }
-
-    /// 서버가 토큰을 거부했다. 들고 있던 값은 죽었으므로 버린다.
-    public static func invalidateClaudeCache() {
-        lock.lock()
-        defer { lock.unlock() }
-        cachedClaude = nil
-        cachedClaudeAt = nil
-    }
-
-    /// 사용자가 드롭다운의 '갱신'을 눌렀을 때 백오프를 걷어낸다
-    /// (`UsageMonitor.forceLiveRefresh`가 부른다). 명시적으로 다시 시도하겠다는 뜻이므로
-    /// 30분을 기다리지 않는다.
-    public static func resetClaudeBackoff() {
-        lock.lock()
-        defer { lock.unlock() }
-        claudeBackoffUntil = nil
-    }
-
-    /// 아직 쓸 수 있는 캐시. 만료됐거나 만료가 코앞이면 nil.
-    private static func usableCachedClaude(now: Date) -> Claude? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let cachedClaude, let cachedClaudeAt else { return nil }
-        if let expiresAt = cachedClaude.expiresAt {
-            return expiresAt.timeIntervalSince(now) > expiryMargin ? cachedClaude : nil
-        }
-        // 만료 시각을 모르면 오래 믿지 않는다.
-        return now.timeIntervalSince(cachedClaudeAt) < blindCacheTTL ? cachedClaude : nil
-    }
-
-    private static func storeClaude(_ credentials: Claude, at date: Date) {
-        lock.lock()
-        defer { lock.unlock() }
-        cachedClaude = credentials
-        cachedClaudeAt = date
-        // 읽기에 성공했다는 건 접근이 허용됐다는 뜻이다.
-        claudeBackoffUntil = nil
+        return (run.output, respondedAt)
     }
 
     private static func beginBackoff(from now: Date) {
         lock.lock()
         defer { lock.unlock() }
-        claudeBackoffUntil = now.addingTimeInterval(deniedBackoff)
+        keychainBackoffUntil = now.addingTimeInterval(deniedBackoff)
     }
 
     private static func backoffDeadline() -> Date? {
         lock.lock()
         defer { lock.unlock() }
-        return claudeBackoffUntil
+        return keychainBackoffUntil
     }
 
     // MARK: - security(1) 호출
@@ -422,6 +528,78 @@ public enum Credentials {
             }
         }
         return high == nil ? decoded : nil
+    }
+
+    /// go-keyring이 값을 감쌀 때 붙이는 접두사. 현행판은 base64, 구버전은 hex다.
+    private static let goKeyringBase64Prefix = Data("go-keyring-base64:".utf8)
+    private static let goKeyringHexPrefix = Data("go-keyring-encoded:".utf8)
+
+    /// `security … -w`가 낸 바이트에서 Antigravity CLI 자격증명을 뽑는다.
+    ///
+    /// agy가 쓰는 go-keyring은 값을 `go-keyring-base64:` + base64(JSON)로 감싸 저장한다.
+    /// 구버전은 `go-keyring-encoded:` + hex(JSON)였고, 접두사가 없으면 원문 JSON이다.
+    /// go-keyring이 굳이 감싸는 이유가 `security`의 hex 변환(`parseClaude` 참고)을 피하려는
+    /// 것이라 현행판 값은 늘 원문으로 나온다. 그래도 접두사 없는 원문에 비인쇄 바이트가 섞이면
+    /// 같은 변환을 타므로 `parseClaude`와 같은 순서로 방어한다 — 그대로 읽어 보고, 실패했을
+    /// 때만 hex를 푼 뒤 다시 읽는다.
+    ///
+    /// JSON에는 refresh_token도 들어 있지만 꺼내지 않는다. 갱신하지 않을 값을 메모리에
+    /// 들고 있을 이유가 없다.
+    ///
+    /// 키체인 없이 테스트할 수 있도록 순수 함수로 떼어 놨다.
+    static func parseGemini(_ raw: Data) -> Gemini? {
+        // go-keyring의 Get도 앞뒤 공백을 걷어낸 뒤 접두사를 본다.
+        let bytes = trimmingASCIIWhitespace(raw)
+        guard !bytes.isEmpty else { return nil }  // 항목은 있는데 값이 비었다
+
+        guard let token = geminiToken(in: bytes) ?? hexDecoded(bytes).flatMap({ geminiToken(in: $0) }),
+              let accessToken = token["access_token"] as? String, !accessToken.isEmpty
+        else { return nil }
+
+        // Go의 time.Time 직렬화라 "2026-10-09T18:40:00.185665+09:00"처럼 소수 6자리와 지역
+        // 오프셋이 붙는다. 0001-01-01은 Go의 zero time으로, oauth2에서 "만료 없음"이란
+        // 뜻이지 "이미 만료"가 아니다 — 모르는 것으로 둔다.
+        var expiresAt: Date?
+        if let text = token["expiry"] as? String,
+           let date = ISO8601.parse(text),
+           date > Date(timeIntervalSince1970: 0) {
+            expiresAt = date
+        }
+
+        return Gemini(accessToken: accessToken, expiresAt: expiresAt)
+    }
+
+    /// go-keyring 포장을 벗기고 `token` 객체를 꺼낸다.
+    private static func geminiToken(in data: Data) -> [String: Any]? {
+        let json: Data
+        if data.starts(with: goKeyringBase64Prefix) {
+            guard let decoded = Data(base64Encoded: Data(data.dropFirst(goKeyringBase64Prefix.count))) else {
+                return nil
+            }
+            json = decoded
+        } else if data.starts(with: goKeyringHexPrefix) {
+            // Go의 hex.EncodeToString은 소문자만 낸다.
+            guard let decoded = hexDecoded(Data(data.dropFirst(goKeyringHexPrefix.count))) else {
+                return nil
+            }
+            json = decoded
+        } else {
+            json = data
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+            return nil
+        }
+        return root["token"] as? [String: Any]
+    }
+
+    private static func trimmingASCIIWhitespace(_ data: Data) -> Data {
+        func isSpace(_ byte: UInt8) -> Bool {
+            byte == 0x20 || byte == 0x09 || byte == 0x0a || byte == 0x0d
+        }
+        guard let first = data.firstIndex(where: { !isSpace($0) }),
+              let last = data.lastIndex(where: { !isSpace($0) })
+        else { return Data() }
+        return Data(data[first...last])
     }
 
     // MARK: - Codex (auth.json)

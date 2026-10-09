@@ -23,12 +23,16 @@ public enum ISO8601 {
         return plainFormatter.date(from: string)
     }
 
-    /// `YYYY-MM-DDTHH:MM:SS[.fff]Z` 전용 경로.
+    /// `YYYY-MM-DDTHH:MM:SS[.fff…](Z|±HH:MM)` 전용 경로.
+    ///
+    /// 오프셋이 붙은 형태도 여기서 처리한다. Go가 쓰는 `2026-10-09T18:40:00.185665+09:00`
+    /// (Antigravity CLI 토큰 만료 시각)과 Claude 응답의 `+00:00`이 그렇다. 포매터로 넘기면
+    /// 소수가 밀리초에서 잘려 마이크로초가 사라진다.
     private static func fastParse(_ string: String) -> Date? {
         let utf8 = Array(string.utf8)
         guard utf8.count >= 20 else { return nil }
         guard utf8[4] == 0x2D, utf8[7] == 0x2D, utf8[10] == 0x54,
-              utf8[13] == 0x3A, utf8[16] == 0x3A, utf8.last == 0x5A
+              utf8[13] == 0x3A, utf8[16] == 0x3A
         else { return nil }
 
         func number(_ range: Range<Int>) -> Int? {
@@ -45,9 +49,10 @@ public enum ISO8601 {
               let hour = number(11..<13), let minute = number(14..<16), let second = number(17..<19)
         else { return nil }
 
+        var index = 19
         var fraction = 0.0
-        if utf8.count > 20, utf8[19] == 0x2E {
-            var index = 20
+        if utf8[index] == 0x2E {
+            index += 1
             var scale = 0.1
             while index < utf8.count, utf8[index] >= 0x30, utf8[index] <= 0x39 {
                 fraction += Double(utf8[index] - 0x30) * scale
@@ -56,10 +61,25 @@ public enum ISO8601 {
             }
         }
 
-        // 1970-01-01부터의 일수를 직접 계산한다(그레고리력, UTC 고정).
+        // 남은 건 `Z` 하나이거나 `±HH:MM` 여섯 바이트여야 한다. 그 밖의 꼴은 포매터에 맡긴다.
+        let offsetSeconds: Int
+        switch utf8.count - index {
+        case 1 where utf8[index] == 0x5A:
+            offsetSeconds = 0
+        case 6 where (utf8[index] == 0x2B || utf8[index] == 0x2D) && utf8[index + 3] == 0x3A:
+            guard let offsetHours = number(index + 1 ..< index + 3),
+                  let offsetMinutes = number(index + 4 ..< index + 6)
+            else { return nil }
+            let sign = utf8[index] == 0x2B ? 1 : -1
+            offsetSeconds = sign * (offsetHours * 3600 + offsetMinutes * 60)
+        default:
+            return nil
+        }
+
+        // 1970-01-01부터의 일수를 직접 계산한다(그레고리력). 지역 시각을 구한 뒤 오프셋을 빼 UTC로 맞춘다.
         let days = daysFromCivil(year: year, month: month, day: day)
         let seconds = Double(days) * 86400 + Double(hour) * 3600 + Double(minute) * 60 + Double(second)
-        return Date(timeIntervalSince1970: seconds + fraction)
+        return Date(timeIntervalSince1970: seconds + fraction - Double(offsetSeconds))
     }
 
     /// Howard Hinnant의 days_from_civil 알고리즘.

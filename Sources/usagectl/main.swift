@@ -97,9 +97,12 @@ case "status":
         if let lastActivityAt = service.lastActivityAt {
             print("  마지막 활동   \(Format.clock(lastActivityAt)) (\(Format.elapsed(since: lastActivityAt, to: now)))")
         }
-        let liveError = service.id == .claudeCode
-            ? monitor.claudeProvider.liveError
-            : monitor.codexProvider.liveError
+        let liveError: LiveUsageError?
+        switch service.id {
+        case .claudeCode: liveError = monitor.claudeProvider.liveError
+        case .codex: liveError = monitor.codexProvider.liveError
+        case .gemini: liveError = monitor.geminiProvider.liveError
+        }
         if let liveError {
             print("  ⚠️ 실시간 조회 실패: \(liveError.description)")
         }
@@ -200,6 +203,30 @@ case "debug":
         } catch {
             print("Codex 스캔 실패: \(error)")
         }
+
+        // Gemini는 스캔할 로그가 없다. 실시간 조회가 언제까지 가능한지와 마지막 관측만 보인다.
+        // 토큰 값은 어떤 형태로도 찍지 않는다 — 터미널 스크롤백과 붙여넣은 이슈에 남는다.
+        print("\nGemini (Antigravity)")
+        do {
+            let credentials = try Credentials.gemini(now: now)
+            if let expiresAt = credentials.expiresAt {
+                let state = credentials.isExpired(at: now)
+                    ? "만료됨 (\(Format.elapsed(since: expiresAt, to: now))) · agy를 실행하면 갱신된다"
+                    : "\(Format.remaining(until: expiresAt, from: now)) 남음"
+                print("  토큰 만료    \(Format.clock(expiresAt)) · \(state)")
+            } else {
+                print("  토큰 만료    알 수 없음")
+            }
+        } catch let error as LiveUsageError {
+            print("  자격증명     \(error.description)")
+        } catch {
+            print("  자격증명     \(error)")
+        }
+        if let observedAt = monitor.geminiProvider.lastObservedAt {
+            print("  마지막 관측  \(Format.clock(observedAt)) (\(Format.elapsed(since: observedAt, to: now)))")
+        } else {
+            print("  마지막 관측  없음")
+        }
     }
 
 case "config":
@@ -221,6 +248,12 @@ case "reset":
     let monitor = UsageMonitor()
     monitor.claudeProvider.resetCache()
     monitor.codexProvider.resetCache()
+    // Gemini의 상태 파일은 스캔 캐시가 아니라 마지막 관측 그 자체라 재스캔으로 돌아오지 않는다.
+    // 토큰이 죽어 있으면 agy를 다음에 실행할 때까지 빈 칸이 된다. 그래도 지운다 — reset은
+    // 쌓인 상태를 버리고 처음부터 보겠다는 명시적 요청이고, 로그아웃·계정 변경 뒤 남은 옛 숫자를
+    // 걷어낼 방법이 이것뿐이다. 실행 중인 앱은 메모리에 제 사본을 들고 있다가 다음 성공한
+    // 조회 때 다시 쓰므로, 실제로 비는 건 토큰이 죽은 채 앱을 다시 띄웠을 때뿐이다.
+    monitor.geminiProvider.resetCache()
     print("캐시를 비웠습니다. 다시 스캔합니다...")
     let snapshot = monitor.refresh(now: now)
     print(String(format: "완료 (%.0fms)", snapshot.elapsed * 1000))

@@ -82,6 +82,9 @@ final class UsageStore: ObservableObject {
     }
 
     /// 캐시를 버리고 전체를 다시 읽는다.
+    ///
+    /// Gemini는 건드리지 않는다. 다시 읽을 로그가 없고, 들고 있는 건 캐시가 아니라 재스캔으로
+    /// 되살릴 수 없는 마지막 관측이다 (`GeminiProvider.resetCache` 참고).
     func fullRescan() {
         workQueue.async { [monitor] in
             monitor.claudeProvider.resetCache()
